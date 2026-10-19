@@ -63,13 +63,13 @@ pub fn tile_px(scale: f32) -> u32 {
 /// The shell does not say whether the alpha is premultiplied. All-zero alpha
 /// means the image carries none: make it opaque. Otherwise premultiply.
 pub fn normalize_alpha(bgra: &mut [u8]) {
-    if bgra.chunks_exact(4).all(|p| p[3] == 0) {
-        for p in bgra.chunks_exact_mut(4) {
+    if bgra.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+        for p in bgra.as_chunks_mut::<4>().0 {
             p[3] = 255;
         }
         return;
     }
-    for p in bgra.chunks_exact_mut(4) {
+    for p in bgra.as_chunks_mut::<4>().0 {
         let a = p[3] as u32;
         if a != 255 {
             for c in &mut p[..3] {

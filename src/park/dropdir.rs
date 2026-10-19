@@ -73,7 +73,7 @@ pub fn create() -> io::Result<PathBuf> {
     std::fs::create_dir_all(&root)?;
     loop {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        let last = LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |l| Some(next_id(l, now))).unwrap_or_default();
+        let last = LAST.try_update(Ordering::Relaxed, Ordering::Relaxed, |l| Some(next_id(l, now))).unwrap_or_default();
         let id = next_id(last, now);
         let dir = root.join(id.to_string());
         match std::fs::create_dir(&dir) {
