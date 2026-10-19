@@ -1,20 +1,101 @@
 //! Clipboard-format helpers shared by the readers: `FORMATETC` building, the
-//! drag-safe `QueryGetData` probe, and naming offered formats for the log
-//! (one line per drag; TASCA-19 reads it to see what sources offer).
+//! drag-safe `QueryGetData` probe, reading `HGLOBAL` data and text, and naming
+//! offered formats for the log (one line per drag; TASCA-19 reads it to see
+//! what sources offer).
 
-use windows::Win32::Foundation::S_OK;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{HGLOBAL, S_OK};
+use windows::Win32::Globalization::{MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
 use windows::Win32::System::Com::{
     CoTaskMemFree, IDataObject, DATADIR_GET, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL,
 };
-use windows::Win32::System::DataExchange::GetClipboardFormatNameW;
+use windows::Win32::System::DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{
     CF_BITMAP, CF_DIB, CF_DIBV5, CF_ENHMETAFILE, CF_HDROP, CF_LOCALE, CF_METAFILEPICT, CF_OEMTEXT, CF_TEXT,
-    CF_UNICODETEXT, CLIPBOARD_FORMAT,
+    CF_UNICODETEXT, CLIPBOARD_FORMAT, DROPEFFECT, ReleaseStgMedium,
 };
+
+/// The id of a registered format (`FileContents`, `PNG`, ...); 0 if it
+/// can't be registered, which no object offers.
+pub fn registered(name: PCWSTR) -> u16 {
+    unsafe { RegisterClipboardFormatW(name) as u16 }
+}
+
+/// The bytes of an `HGLOBAL`, at most `limit` of them (`GlobalSize` may be
+/// rounded up, so a known size is trusted over it).
+pub fn global_bytes(h: HGLOBAL, limit: Option<u64>) -> Vec<u8> {
+    unsafe {
+        let size = GlobalSize(h);
+        let p = GlobalLock(h) as *const u8;
+        if p.is_null() {
+            return Vec::new();
+        }
+        let n = limit.map_or(size, |l| l.min(size as u64) as usize);
+        let v = std::slice::from_raw_parts(p, n).to_vec();
+        let _ = GlobalUnlock(h);
+        v
+    }
+}
+
+/// `cf` read as an `HGLOBAL` (in `Drop` or later, never during the drag).
+pub fn hglobal_bytes(obj: &IDataObject, cf: u16) -> Option<Vec<u8>> {
+    unsafe {
+        let mut m = obj.GetData(&hglobal_format(cf)).ok()?;
+        let v = (m.tymed == TYMED_HGLOBAL.0 as u32).then(|| global_bytes(m.u.hGlobal, None));
+        ReleaseStgMedium(&mut m);
+        v
+    }
+}
+
+/// Little-endian UTF-16 up to the first NUL.
+pub fn utf16_z(bytes: &[u8]) -> String {
+    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// ANSI text up to the first NUL.
+pub fn ansi_z(bytes: &[u8]) -> String {
+    ansi(&bytes[..bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len())])
+}
+
+/// ANSI text (the system code page) as a `String`.
+pub fn ansi(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    unsafe {
+        let n = MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None);
+        let mut w = vec![0u16; n.max(0) as usize];
+        let n = MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut w));
+        String::from_utf16_lossy(&w[..n.max(0) as usize])
+    }
+}
 
 /// A format asked for as an `HGLOBAL`.
 pub fn hglobal_format(cf: u16) -> FORMATETC {
-    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 }
+    format(cf, -1, TYMED_HGLOBAL.0 as u32)
+}
+
+/// `cf` at `lindex` (`-1`: all of it), on any of the `tymed` media.
+pub fn format(cf: u16, lindex: i32, tymed: u32) -> FORMATETC {
+    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex, tymed }
+}
+
+/// The object offers the wide or the ANSI form of a format.
+pub fn offers_either(obj: &IDataObject, wide: u16, ansi: u16) -> bool {
+    offers(obj, wide) || offers(obj, ansi)
+}
+
+/// Text from the wide format (UTF-16), else the ANSI one, up to the first NUL.
+pub fn text(obj: &IDataObject, wide: u16, ansi: u16) -> Option<String> {
+    hglobal_bytes(obj, wide).map(|b| utf16_z(&b)).or_else(|| hglobal_bytes(obj, ansi).map(|b| ansi_z(&b)))
+}
+
+/// A drop effect for the log: `COPY`, `MOVE|LINK`, `NONE`, ...
+pub fn effect_name(e: DROPEFFECT) -> String {
+    let s = flag_names(e.0, &[(1, "COPY"), (2, "MOVE"), (4, "LINK")]);
+    if s.is_empty() { "NONE".into() } else { s }
 }
 
 /// The object offers `cf` as an `HGLOBAL`. `QueryGetData` only: it renders

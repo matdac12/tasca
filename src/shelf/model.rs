@@ -129,6 +129,9 @@ pub struct Model {
     selected: BTreeSet<ItemId>,
     /// Where a Shift-click range starts.
     anchor: Option<ItemId>,
+    /// Items whose files are still being written (TASCA-16): not probed and
+    /// without a thumbnail until `fill`.
+    pending: BTreeSet<ItemId>,
 }
 
 impl Model {
@@ -165,6 +168,27 @@ impl Model {
         id
     }
 
+    /// `add_top` for an Item whose files are still being written.
+    pub fn add_pending(&mut self, files: Vec<PathBuf>, kind: Kind) -> ItemId {
+        let id = self.add_top(files, kind);
+        self.pending.insert(id);
+        id
+    }
+
+    pub fn is_pending(&self, id: ItemId) -> bool {
+        self.pending.contains(&id)
+    }
+
+    /// A pending Item's files are written: keep these (not empty). False if
+    /// the Item is gone.
+    pub fn fill(&mut self, id: ItemId, files: Vec<PathBuf>) -> bool {
+        debug_assert!(!files.is_empty());
+        self.pending.remove(&id);
+        let Some(i) = self.items.iter_mut().find(|i| i.id == id) else { return false };
+        i.files = files;
+        true
+    }
+
     /// Move an existing Item to the top. False if it is not on the Shelf.
     pub fn move_to_top(&mut self, id: ItemId) -> bool {
         let Some(i) = self.index_of(id) else { return false };
@@ -192,6 +216,7 @@ impl Model {
         self.items.retain(|i| !ids.contains(&i.id));
         for id in ids {
             self.selected.remove(id);
+            self.pending.remove(id);
         }
         if self.anchor.is_some_and(|a| ids.contains(&a)) {
             self.anchor = None;
@@ -200,6 +225,7 @@ impl Model {
     }
 
     pub fn clear(&mut self) {
+        self.pending.clear();
         self.items.clear();
         self.selected.clear();
         self.anchor = None;
@@ -310,6 +336,26 @@ mod tests {
 
     fn sel(m: &Model) -> Vec<ItemId> {
         m.selected_ids()
+    }
+
+    #[test]
+    fn a_pending_item_is_pending_until_its_files_are_filled_in() {
+        let mut m = Model::new();
+        let id = m.add_pending(vec!["a.png".into(), "b.png".into()], Kind::Materialized);
+        assert!(m.is_pending(id) && m.get(id).unwrap().is_stack());
+        assert_eq!(m.items()[0].id, id);
+
+        assert!(m.fill(id, vec!["b.png".into()]));
+        assert!(!m.is_pending(id));
+        assert_eq!(m.get(id).unwrap().files, vec![PathBuf::from("b.png")]);
+        assert!(!m.fill(id + 1, vec!["x".into()]), "unknown id");
+
+        let plain = m.add_top(vec!["c.txt".into()], Kind::Reference);
+        assert!(!m.is_pending(plain));
+        // Removed while pending: forgotten.
+        let gone = m.add_pending(vec!["d.txt".into()], Kind::Materialized);
+        m.remove(&[gone]);
+        assert!(!m.is_pending(gone));
     }
 
     #[test]
