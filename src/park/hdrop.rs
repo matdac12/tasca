@@ -34,28 +34,25 @@ pub fn park(obj: &IDataObject) -> Option<Parked> {
             return None;
         }
     };
-    let total = paths.len();
     let (files, copied) = keep_or_copy(paths);
-    if files.len() < total {
-        log(format!("{} of {total} dropped path(s) dropped (copy failed)", total - files.len()));
-    }
     let kind = rules::kind_for(copied, files.len());
     rules::item_files(files).map(|files| Parked { files, kind })
 }
 
-/// The paths in the data object's `CF_HDROP`, in drop order.
-pub fn read(obj: &IDataObject) -> windows::core::Result<Vec<PathBuf>> {
+/// The paths in the data object's `CF_HDROP`, in drop order, in long form (a
+/// source may send 8.3 names; the Shelf and the duplicate rule see one form).
+fn read(obj: &IDataObject) -> windows::core::Result<Vec<PathBuf>> {
     unsafe {
         let mut m = obj.GetData(&hglobal_format(CF_HDROP.0))?;
         let hdrop = HDROP(m.u.hGlobal.0);
         let n = DragQueryFileW(hdrop, u32::MAX, None);
         let mut v = Vec::with_capacity(n as usize);
+        let mut buf = Vec::new();
         for i in 0..n {
-            let len = DragQueryFileW(hdrop, i, None) as usize;
-            let mut buf = vec![0u16; len + 1];
+            buf.resize(DragQueryFileW(hdrop, i, None) as usize + 1, 0);
             let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
             if got > 0 {
-                v.push(PathBuf::from(String::from_utf16_lossy(&buf[..got])));
+                v.push(dropdir::long_name(Path::new(&String::from_utf16_lossy(&buf[..got]))));
             }
         }
         ReleaseStgMedium(&mut m);
@@ -90,12 +87,11 @@ fn keep_or_copy(paths: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
     (files, copied)
 }
 
-/// `path` is inside `GetTempPath2W` but not inside `%TEMP%\Tasca`. Either side
-/// may be in 8.3 form, so the path and its long form are tested against both
-/// forms of the temp folder (a path that no longer exists has no long form).
+/// `path` (long form, from `read`) is inside `GetTempPath2W` but not inside
+/// `%TEMP%\Tasca`. Both forms of the temp folder count: a path that no longer
+/// exists keeps its 8.3 form.
 pub fn is_temp(path: &Path) -> bool {
-    let long = dropdir::long_name(path);
-    dropdir::temp_dirs().iter().any(|t| rules::is_temp_path(&long, t) || rules::is_temp_path(path, t))
+    dropdir::temp_dirs().iter().any(|t| rules::is_temp_path(path, t))
 }
 
 /// Copy a file or folder (recursively) into the drop folder, under its own
@@ -107,7 +103,7 @@ fn copy_into(src: &Path, dir: &mut Option<PathBuf>) -> io::Result<PathBuf> {
         None => dir.insert(dropdir::create()?),
     };
     let dst = dropdir::free_name(dir, name);
-    let r = copy_tree(src, &dst);
+    let r = std::fs::metadata(src).and_then(|m| copy_tree(src, &dst, m.is_dir()));
     if r.is_err() {
         let _ = if dst.is_dir() { std::fs::remove_dir_all(&dst) } else { std::fs::remove_file(&dst) };
     }
@@ -116,18 +112,19 @@ fn copy_into(src: &Path, dir: &mut Option<PathBuf>) -> io::Result<PathBuf> {
 
 /// `std::fs::copy` for a file; a folder is recreated and walked. Links inside
 /// a folder are skipped (a junction loop must not hang `Drop`).
-fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
-    if !std::fs::metadata(src)?.is_dir() {
+fn copy_tree(src: &Path, dst: &Path, is_dir: bool) -> io::Result<()> {
+    if !is_dir {
         return std::fs::copy(src, dst).map(|_| ());
     }
     std::fs::create_dir(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        if entry.file_type()?.is_symlink() {
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
             log(format!("skipped link {}", entry.path().display()));
             continue;
         }
-        copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
+        copy_tree(&entry.path(), &dst.join(entry.file_name()), kind.is_dir())?;
     }
     Ok(())
 }

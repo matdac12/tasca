@@ -74,14 +74,8 @@ pub fn create() -> io::Result<PathBuf> {
     std::fs::create_dir_all(&root)?;
     loop {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-        let mut last = LAST.load(Ordering::Relaxed);
-        let id = loop {
-            let id = next_id(last, now);
-            match LAST.compare_exchange(last, id, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break id,
-                Err(seen) => last = seen,
-            }
-        };
+        let last = LAST.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |l| Some(next_id(l, now))).unwrap_or_default();
+        let id = next_id(last, now);
         let dir = root.join(id.to_string());
         match std::fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),

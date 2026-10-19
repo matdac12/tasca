@@ -24,7 +24,7 @@ use windows::Win32::System::Ole::{IDropTarget, OleInitialize, OleUninitialize, R
 use windows::Win32::UI::Shell::{CLSID_DragDropHelper, IDropTargetHelper};
 
 use crate::log::log;
-use crate::shelf::{self, model::{ItemId, Kind}};
+use crate::shelf::{self, model::Kind};
 
 /// What a reader made of a drop: the files of one Item, in drop order.
 #[derive(Debug, PartialEq, Eq)]
@@ -36,14 +36,15 @@ pub struct Parked {
 /// Put a Park on the Shelf: the same path set as an Item already there moves
 /// that Item to the top; anything else is a new Item on top. The Shelf stays
 /// shown either way.
-pub fn place(p: Parked) -> Option<ItemId> {
+pub fn place(p: Parked) {
     match shelf::with_model(|m| m.same_files(&p.files)).flatten() {
         Some(id) => {
             log(format!("duplicate Park: Item {id} moved to the top"));
             shelf::move_to_top(id);
-            Some(id)
         }
-        None => shelf::add_top(p.files, p.kind),
+        None => {
+            shelf::add_top(p.files, p.kind);
+        }
     }
 }
 
@@ -64,9 +65,13 @@ pub fn register(hwnd: HWND) {
         let helper: Option<IDropTargetHelper> = CoCreateInstance(&CLSID_DragDropHelper, None, CLSCTX_INPROC_SERVER)
             .inspect_err(|e| log(format!("no IDropTargetHelper (no drag image over the Shelf): {e:?}")))
             .ok();
+        let has_helper = helper.is_some();
         let target: IDropTarget = target::DropTarget::new(hwnd, helper).into();
         match RegisterDragDrop(hwnd, &target) {
-            Ok(()) => REGISTERED.set(true),
+            Ok(()) => {
+                REGISTERED.set(true);
+                log(format!("drop target registered (drag image helper: {has_helper})"));
+            }
             Err(e) => log(format!("RegisterDragDrop failed, Park is off: {e:?}")),
         }
     }
@@ -179,19 +184,19 @@ mod tests {
         let mut m = Model::new();
 
         let one = target::read(&hdrop_object(&paths[..1])).unwrap();
-        assert_eq!(one, ("CF_HDROP", Parked { files: paths[..1].to_vec(), kind: Kind::Reference }));
-        assert_eq!(m.same_files(&one.1.files), None);
-        let single = m.add_top(one.1.files, one.1.kind);
+        assert_eq!(one, Parked { files: paths[..1].to_vec(), kind: Kind::Reference });
+        assert_eq!(m.same_files(&one.files), None);
+        let single = m.add_top(one.files, one.kind);
         assert!(!m.get(single).unwrap().is_stack());
 
-        let (_, three) = target::read(&hdrop_object(&paths)).unwrap();
+        let three = target::read(&hdrop_object(&paths)).unwrap();
         assert_eq!(three, Parked { files: paths.clone(), kind: Kind::Reference });
         assert_eq!(m.same_files(&three.files), None);
         let stack = m.add_top(three.files, three.kind);
         assert!(m.get(stack).unwrap().is_stack());
 
         // The same selection again, in another order: no new Item, it goes on top.
-        let (_, again) = target::read(&hdrop_object(&[paths[2].clone(), paths[0].clone(), paths[1].clone()])).unwrap();
+        let again = target::read(&hdrop_object(&[paths[2].clone(), paths[0].clone(), paths[1].clone()])).unwrap();
         assert_eq!(m.same_files(&again.files), Some(stack));
         assert_eq!(m.same_files(&paths[..1]), Some(single));
 
@@ -207,7 +212,7 @@ mod tests {
         let (src, paths) = files_in(dropdir::temp_dir(), "7zE", &["photo.jpg", "folder/inner/deep.txt", "folder/top.txt"]);
         let dropped = vec![paths[0].clone(), src.join("folder")];
 
-        let (_, p) = target::read(&hdrop_object(&dropped)).unwrap();
+        let p = target::read(&hdrop_object(&dropped)).unwrap();
         assert_eq!(p.kind, Kind::Materialized);
         assert_eq!(names(&p.files), ["photo.jpg", "folder"]);
         let drop_dir = p.files[0].parent().unwrap().to_path_buf();
@@ -221,7 +226,7 @@ mod tests {
         assert_eq!(std::fs::read(p.files[1].join("top.txt")).unwrap(), b"folder/top.txt");
 
         // Copies in our drop folder are kept by path when dropped again.
-        let (_, back) = target::read(&hdrop_object(&p.files)).unwrap();
+        let back = target::read(&hdrop_object(&p.files)).unwrap();
         assert_eq!(back, Parked { files: p.files.clone(), kind: Kind::Reference });
         std::fs::remove_dir_all(drop_dir).unwrap();
     }
@@ -229,7 +234,7 @@ mod tests {
     #[test]
     fn same_named_temp_files_get_distinct_copies() {
         let (src, paths) = files_in(dropdir::temp_dir(), "dup", &["x/a.txt", "y/a.txt"]);
-        let (_, p) = target::read(&hdrop_object(&paths)).unwrap();
+        let p = target::read(&hdrop_object(&paths)).unwrap();
         assert_eq!(names(&p.files), ["a.txt", "a (2).txt"]);
         assert_eq!(std::fs::read(&p.files[1]).unwrap(), b"y/a.txt");
         std::fs::remove_dir_all(src).unwrap();
@@ -242,7 +247,7 @@ mod tests {
         let (tmp_dir, tmps) = files_in(dropdir::temp_dir(), "mix", &["copied.txt"]);
         let gone = tmp_dir.join("vanished.txt");
 
-        let (_, p) = target::read(&hdrop_object(&[refs[0].clone(), gone.clone(), tmps[0].clone()])).unwrap();
+        let p = target::read(&hdrop_object(&[refs[0].clone(), gone.clone(), tmps[0].clone()])).unwrap();
         assert_eq!(p.kind, Kind::Reference);
         assert_eq!(p.files[0], refs[0]);
         assert_eq!(names(&p.files), ["kept.txt", "copied.txt"]);
@@ -264,8 +269,13 @@ mod tests {
         let n = unsafe { GetShortPathNameW(&wide, Some(&mut buf)) } as usize;
         assert!(n > 0 && n < buf.len());
         let short = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
-        // Without 8.3 names on the volume, short == long; both must be temp.
-        assert!(hdrop::is_temp(&short), "{}", short.display());
+        // Without 8.3 names on the volume, short == long. Either way the drop
+        // reads the long form, sees a temp path and copies it.
+        let p = target::read(&hdrop_object(std::slice::from_ref(&short))).unwrap();
+        assert_eq!(p.kind, Kind::Materialized, "{}", short.display());
+        assert_eq!(names(&p.files), ["file.txt"]);
+        assert!(!p.files[0].to_string_lossy().contains('~'), "{}", p.files[0].display());
+        std::fs::remove_dir_all(p.files[0].parent().unwrap()).unwrap();
         assert!(hdrop::is_temp(&paths[0]));
         assert!(!hdrop::is_temp(&dropdir::root().join("1").join("file.txt")));
         // A path that is gone can't be expanded: it still counts, in either form.

@@ -2,7 +2,7 @@
 //! facts arrive from `probe`, on a worker thread).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Stable for the life of the resident, never reused, so background threads
 /// can post results by id after the list has changed.
@@ -92,6 +92,17 @@ impl Item {
     }
 }
 
+/// A path as compared for equality: lower case (NTFS is case-insensitive),
+/// `\` separators, no `\\?\` prefix, no trailing separator.
+pub fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
+    let s = match s.strip_prefix(r"\\?\unc\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned(),
+    };
+    s.trim_end_matches('\\').to_owned()
+}
+
 pub fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
@@ -169,7 +180,7 @@ impl Model {
     /// this path set (any order, case-insensitive), if one is on the Shelf.
     pub fn same_files(&self, files: &[PathBuf]) -> Option<ItemId> {
         fn key(files: &[PathBuf]) -> BTreeSet<String> {
-            files.iter().map(|f| f.to_string_lossy().to_lowercase()).collect()
+            files.iter().map(|f| path_key(f)).collect()
         }
         let want = key(files);
         if want.is_empty() {
@@ -346,6 +357,9 @@ mod tests {
         assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\b.txt"])), None);
         assert_eq!(m.same_files(&p(&[r"C:\x\b.txt"])), None);
         assert_eq!(m.same_files(&[]), None);
+        // Spellings of the same path match too.
+        assert_eq!(m.same_files(&p(&[r"\\?\C:\x\a.txt"])), Some(single));
+        assert_eq!(m.same_files(&p(&["C:/x/a.txt"])), Some(single));
         // A path listed twice in one drop is still the same set.
         assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\a.txt"])), Some(single));
     }

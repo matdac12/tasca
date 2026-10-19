@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_NONE};
 
-use crate::shelf::model::Kind;
+use crate::shelf::model::{path_key, Kind};
 
 /// The effect to answer: `COPY` if the source allows it, else `LINK`, else
 /// `NONE`. Never `MOVE` (a Park never moves the source), whatever keys are
@@ -29,22 +29,12 @@ pub fn choose_effect(allowed: DROPEFFECT, supported: bool, own_drag: bool) -> DR
 /// the Park must copy it. Case-insensitive; `\\?\` prefixes and trailing
 /// separators are ignored. Short (8.3) names must be expanded by the caller.
 pub fn is_temp_path(path: &Path, temp: &Path) -> bool {
-    let (path, temp) = (comparable(path), comparable(temp));
+    let (path, temp) = (path_key(path), path_key(temp));
     if temp.is_empty() {
         return false;
     }
     let Some(rest) = path.strip_prefix(&temp).and_then(|r| r.strip_prefix('\\')) else { return false };
     !rest.is_empty() && rest.split('\\').next() != Some("tasca")
-}
-
-/// Lower case, `\` separators, no `\\?\` prefix, no trailing separator.
-fn comparable(p: &Path) -> String {
-    let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
-    let s = match s.strip_prefix(r"\\?\unc\") {
-        Some(unc) => format!(r"\\{unc}"),
-        None => s.strip_prefix(r"\\?\").map_or(s.clone(), str::to_owned),
-    };
-    s.trim_end_matches('\\').to_owned()
 }
 
 /// The files of the one Item a Park makes: one path is a single Item, several

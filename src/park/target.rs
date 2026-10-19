@@ -37,14 +37,17 @@ pub fn supported(obj: &IDataObject) -> bool {
 }
 
 /// The first reader that is offered and reads successfully makes the Park.
-pub fn read(obj: &IDataObject) -> Option<(&'static str, Parked)> {
-    READERS.iter().filter(|r| (r.offered)(obj)).find_map(|r| (r.park)(obj).map(|p| (r.name, p)))
+pub fn read(obj: &IDataObject) -> Option<Parked> {
+    READERS.iter().filter(|r| (r.offered)(obj)).find_map(|r| {
+        let p = (r.park)(obj)?;
+        log(format!("drop: {}, {} file(s), {:?}", r.name, p.files.len(), p.kind));
+        Some(p)
+    })
 }
 
 fn effect_name(e: DROPEFFECT) -> String {
-    let names = [(1, "COPY"), (2, "MOVE"), (4, "LINK")];
-    let v: Vec<_> = names.iter().filter(|(bit, _)| e.0 & bit != 0).map(|(_, n)| *n).collect();
-    if v.is_empty() { "NONE".into() } else { v.join("|") }
+    let s = formats::flag_names(e.0, &[(1, "COPY"), (2, "MOVE"), (4, "LINK")]);
+    if s.is_empty() { "NONE".into() } else { s }
 }
 
 #[implement(IDropTarget)]
@@ -65,6 +68,12 @@ impl DropTarget {
         let e = rules::choose_effect(allowed, self.supported.get(), shelf::in_own_drag());
         shelf::set_hot(e != DROPEFFECT_NONE);
         e
+    }
+
+    /// The drag left or ended: forget it and drop the outline.
+    fn reset(&self) {
+        self.supported.set(false);
+        shelf::set_hot(false);
     }
 }
 
@@ -99,8 +108,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(h) = &self.helper {
             let _ = unsafe { h.DragLeave() };
         }
-        self.supported.set(false);
-        shelf::set_hot(false);
+        self.reset();
         Ok(())
     }
 
@@ -109,8 +117,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         if let Some(h) = &self.helper {
             let _ = unsafe { h.Drop(obj.as_ref(), &screen(pt), allowed) };
         }
-        self.supported.set(false);
-        shelf::set_hot(false);
+        self.reset();
         let own = shelf::in_own_drag();
         let parked = match obj.as_ref() {
             Some(o) if !own => read(o),
@@ -119,10 +126,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let e = rules::choose_effect(allowed, parked.is_some(), own);
         unsafe { *eff = e };
         match parked {
-            Some((reader, p)) => {
-                log(format!("drop: {reader}, {} file(s), {:?}, answer {}", p.files.len(), p.kind, effect_name(e)));
-                place(p);
-            }
+            Some(p) => place(p),
             None if own => log("drop of our own Take out: ignored"),
             None => log(format!("drop: nothing parked, answer {}", effect_name(e))),
         }
