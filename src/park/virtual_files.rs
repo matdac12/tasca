@@ -10,7 +10,6 @@
 //! Otherwise each entry's medium is taken in `Drop` (bytes copied, streams
 //! and storages marshalled) and the worker writes them.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
@@ -59,42 +58,31 @@ pub fn park(obj: &IDataObject) -> Option<Park> {
     let entries: Vec<Entry> = match source {
         Some(_) => plan
             .iter()
-            .map(|(i, rel, d)| if d.is_dir { Entry::dir(dir.join(rel)) } else { Entry::contents(dir.join(rel), *i, d.size) })
+            .map(|(i, rel, d)| if d.is_dir { Entry::dir(rel.clone()) } else { Entry::contents(rel.clone(), *i, d.size) })
             .collect(),
-        None => take_now(obj, &dir, &plan),
+        None => take_now(obj, &job::staging(&dir), &plan),
     };
     if entries.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
-    let files = tops(&dir, entries.iter().map(|e| e.path.as_path()));
-    Some(Park::Planned(Parked { files: files.clone(), kind: Kind::Materialized }, Writes { dir, files, entries, source }))
+    let writes = Writes { dir, entries, source };
+    Some(Park::Planned(Parked { files: writes.files(), kind: Kind::Materialized }, writes))
 }
 
 /// Take each entry's contents now (no async operation keeps the source's
 /// data alive past `Drop`). Entries that can't be read are left out.
-fn take_now(obj: &IDataObject, dir: &Path, plan: &[(i32, PathBuf, &Desc)]) -> Vec<Entry> {
+fn take_now(obj: &IDataObject, stage: &Path, plan: &[(i32, PathBuf, &Desc)]) -> Vec<Entry> {
     plan.iter()
         .filter_map(|(i, rel, d)| {
-            let path = dir.join(rel);
             if d.is_dir {
-                return Some(Entry::dir(path));
+                return Some(Entry::dir(rel.clone()));
             }
             job::file_contents(obj, *i)
-                .and_then(|m| Entry::medium(path, m, d.size))
+                .and_then(|m| Entry::medium(rel.clone(), m, d.size, stage))
                 .inspect_err(|e| log(format!("FileContents[{i}] ({:?}) unreadable: {e}", d.name)))
                 .ok()
         })
-        .collect()
-}
-
-/// The Item's files: the top-level entries of the drop folder, in order.
-fn tops<'a>(dir: &Path, paths: impl Iterator<Item = &'a Path>) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    paths
-        .filter_map(|p| p.strip_prefix(dir).ok()?.components().next())
-        .filter(|first| seen.insert(*first))
-        .map(|first| dir.join(first))
         .collect()
 }
 

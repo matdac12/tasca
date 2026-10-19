@@ -74,10 +74,8 @@ impl Park {
 /// A Park of one Materialized file called `name` holding `bytes` (rules 4–6).
 fn one_file(name: &str, bytes: Vec<u8>) -> Option<Park> {
     let dir = dropdir::create().inspect_err(|e| log(format!("no drop folder: {e}"))).ok()?;
-    let path = dir.join(name);
-    let entries = vec![job::Entry::bytes(path.clone(), bytes)];
-    let writes = job::Writes { dir, files: vec![path.clone()], entries, source: None };
-    Some(Park::Planned(Parked { files: vec![path], kind: Kind::Materialized }, writes))
+    let writes = job::Writes { dir, entries: vec![job::Entry::bytes(name.into(), bytes)], source: None };
+    Some(Park::Planned(Parked { files: writes.files(), kind: Kind::Materialized }, writes))
 }
 
 /// Put a Park on the Shelf: the same path set as an Item already there moves
@@ -102,7 +100,10 @@ fn land(hwnd: HWND, park: Park) {
         Park::Ready(p) => place(p),
         Park::Planned(p, writes) => match shelf::add_pending(p.files, p.kind) {
             Some(id) => start(hwnd, job::Job::Write(id, writes)),
-            None => log("the Shelf is busy: drop dropped"),
+            None => {
+                log("the Shelf is busy: drop abandoned");
+                writes.abandon();
+            }
         },
         Park::Later(job) => start(hwnd, job),
     }
@@ -123,8 +124,13 @@ fn start(hwnd: HWND, job: job::Job) {
 }
 
 /// `WM_PARK_DONE`: workers finished. Pending Items fill in (or leave, if
-/// nothing was written); async drops are placed.
-pub fn on_done() {
+/// nothing was written); async drops are placed. If the Shelf is busy (a
+/// re-entrant call), the reports stay queued and the message is posted again.
+pub fn on_done(hwnd: HWND) {
+    if shelf::with_model(|_| ()).is_none() {
+        job::deliver(hwnd.0 as isize, None);
+        return;
+    }
     for done in job::take() {
         match done {
             job::Done::Filled(id, files) => {
@@ -514,6 +520,45 @@ mod tests {
         assert_eq!(run(job), Some(job::Done::Filled(2, vec![])));
         assert!(!p.files[0].parent().unwrap().exists(), "the empty drop folder is removed");
         assert_eq!(*ended.borrow(), Some((E_FAIL, 0)));
+
+        // A folder whose files all fail goes too.
+        let descriptor = group_w(&[("Folder", FD_ATTRIBUTES.0, DIR, 0), (r"Folder\a.txt", 0, 0, 0)], 2);
+        let source = Source::new(true).with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &descriptor);
+        let (p, job) = planned(target::read(&source.into()), 4);
+        assert_eq!(names(&p.files), ["Folder"]);
+        assert_eq!(run(job), Some(job::Done::Filled(4, vec![])));
+        assert!(!p.files[0].parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_planned_drop_with_no_item_to_fill_is_abandoned() {
+        // No Shelf in tests: `add_pending` finds none, as when it is busy.
+        let source = Source::new(true)
+            .with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &group_w(&[("a.txt", 0, 0, 0)], 1))
+            .with(cf(CFSTR_FILECONTENTS), 0, As::HGlobal, b"a");
+        let ended = source.ended();
+        let park = target::read(&source.into()).unwrap();
+        let Park::Planned(p, _) = &park else { panic!("expected a planned Park") };
+        let dir = p.files[0].parent().unwrap().to_path_buf();
+        assert!(dir.exists());
+        land(windows::Win32::Foundation::HWND::default(), park);
+        assert_eq!(*ended.borrow(), Some((E_FAIL, 0)));
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn files_appear_only_when_complete() {
+        // The worker writes into a staging folder and moves finished files into place.
+        let source = Source::new(false)
+            .with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &group_w(&[("a.txt", 0, 0, 0)], 1))
+            .with(cf(CFSTR_FILECONTENTS), 0, As::Stream, b"abc");
+        let (p, job) = planned(target::read(&source.into()), 5);
+        let dir = p.files[0].parent().unwrap().to_path_buf();
+        assert!(!p.files[0].exists());
+        assert_eq!(run(job), Some(job::Done::Filled(5, p.files.clone())));
+        assert_eq!(std::fs::read(&p.files[0]).unwrap(), b"abc");
+        assert!(!job::staging(&dir).exists(), "the staging folder is gone");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -562,6 +607,10 @@ mod tests {
         // ANSI, no title: named by the host.
         let source = Source::new(false).with(cf(CFSTR_INETURLA), -1, As::HGlobal, b"http://www.example.org/x\0");
         assert_eq!(one(source.into()).0, "www.example.org.url");
+
+        // Only the first line is the URL: nothing else gets into the file.
+        let source = Source::new(false).with(cf(CFSTR_INETURLW), -1, As::HGlobal, &utf16z("https://a.example/\r\nIconFile=\\\\host\\x.ico"));
+        assert_eq!(one(source.into()).1, b"[InternetShortcut]\r\nURL=https://a.example/\r\n");
     }
 
     #[test]

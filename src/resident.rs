@@ -44,7 +44,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_PARK_DONE => {
-                park::on_done();
+                park::on_done(hwnd);
                 LRESULT(0)
             }
             WM_QUIT_RESIDENT => {

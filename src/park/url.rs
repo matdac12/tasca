@@ -16,7 +16,8 @@ pub fn offered(obj: &IDataObject) -> bool {
 
 pub fn park(obj: &IDataObject) -> Option<Park> {
     let url = formats::text(obj, registered(CFSTR_INETURLW), registered(CFSTR_INETURLA))?;
-    let url = url.trim();
+    // One URL, one line: nothing after it may reach the shortcut file.
+    let url = url.trim_start().lines().next().unwrap_or("").trim();
     if url.is_empty() {
         return None;
     }
