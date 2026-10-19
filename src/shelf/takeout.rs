@@ -17,9 +17,8 @@ mod rule;
 use std::cell::Cell;
 use std::path::Path;
 
-use windows::core::{implement, ComObject, BOOL, HRESULT, HSTRING};
+use windows::core::{implement, ComObject, BOOL, HRESULT};
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, POINT, S_OK};
-use windows::Win32::Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
 use windows::Win32::System::Ole::{
     IDropSource, IDropSource_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
@@ -53,7 +52,7 @@ pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
         return;
     }
     let ids: Vec<ItemId> = items.iter().map(|i| i.id).collect();
-    let paths: Vec<_> = items.iter().flat_map(|i| i.files.iter().cloned()).collect();
+    let paths = rule::drag_paths(&items);
     let (obj, via) = match data::build(&paths) {
         Ok(o) => o,
         Err(e) => {
@@ -76,7 +75,7 @@ pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
         logical: data::read_dword(&obj, CFSTR_LOGICALPERFORMEDDROPEFFECT).map(DROPEFFECT),
     };
     let mut gone = None;
-    let success = rule::succeeded(&o, || *gone.insert(rule::reference_gone(&items, exists)));
+    let success = rule::succeeded(&o, || *gone.insert(rule::reference_gone(&items, surely_gone)));
     log(format!(
         "take out of {ids:?} via {via:?}: ended {:?}, effect {}, logical {}, Reference gone {} => {}",
         o.ending,
@@ -101,9 +100,16 @@ pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
     }
 }
 
-/// One attribute lookup, no handle opened (cheaper than `Path::exists`).
+/// The probe's test (`metadata`, long paths included): any error is Missing,
+/// so the row and the Take out agree.
 fn exists(p: &Path) -> bool {
-    unsafe { GetFileAttributesW(&HSTRING::from(p)) != INVALID_FILE_ATTRIBUTES }
+    std::fs::metadata(p).is_ok()
+}
+
+/// Only "not found" counts as gone after a drop: an unreachable share or a
+/// denied lookup must not make an Item leave.
+fn surely_gone(p: &Path) -> bool {
+    std::fs::metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn effect_name(e: DROPEFFECT) -> String {

@@ -52,9 +52,18 @@ pub fn one_folder(paths: &[PathBuf]) -> bool {
     }
 }
 
-/// Some Reference file of these Items is gone (after the drop).
-pub fn reference_gone(items: &[&Item], exists: impl Fn(&Path) -> bool) -> bool {
-    items.iter().filter(|i| i.kind == Kind::Reference).flat_map(|i| &i.files).any(|f| !exists(f))
+/// The files to put on the data object, in order. Items can share a file (a
+/// Stack and a single Item of one of its files): each path goes on once, or
+/// Explorer would move it and then fail on the second copy.
+pub fn drag_paths(items: &[&Item]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    items.iter().flat_map(|i| &i.files).filter(|f| seen.insert(path_key(f))).cloned().collect()
+}
+
+/// Some Reference file of these Items is gone (after the drop). `gone` must
+/// be sure: a share that doesn't answer is not a moved file.
+pub fn reference_gone(items: &[&Item], gone: impl Fn(&Path) -> bool) -> bool {
+    items.iter().filter(|i| i.kind == Kind::Reference).flat_map(|i| &i.files).any(|f| gone(f))
 }
 
 #[cfg(test)]
@@ -177,9 +186,17 @@ mod tests {
     fn only_reference_paths_count_as_gone() {
         let r = item(1, Kind::Reference, &[r"C:\x\a.txt", r"C:\x\moved.txt"]);
         let m = item(2, Kind::Materialized, &[r"C:\t\moved.png"]);
-        let exists = |p: &Path| !p.to_string_lossy().contains("moved");
-        assert!(reference_gone(&[&r], exists));
-        assert!(!reference_gone(&[&m], exists), "a Materialized file is covered by the effects");
-        assert!(!reference_gone(&[&item(3, Kind::Reference, &[r"C:\x\a.txt"])], exists));
+        let gone = |p: &Path| p.to_string_lossy().contains("moved");
+        assert!(reference_gone(&[&r], gone));
+        assert!(!reference_gone(&[&m], gone), "a Materialized file is covered by the effects");
+        assert!(!reference_gone(&[&item(3, Kind::Reference, &[r"C:\x\a.txt"])], gone));
+    }
+
+    #[test]
+    fn a_file_shared_by_two_dragged_items_goes_on_once() {
+        let stack = item(1, Kind::Reference, &[r"C:\x\a.txt", r"C:\x\b.txt"]);
+        let single = item(2, Kind::Reference, &[r"c:\X\A.txt"]);
+        let other = item(3, Kind::Reference, &[r"C:\x\c.txt"]);
+        assert_eq!(drag_paths(&[&stack, &single, &other]), [r"C:\x\a.txt", r"C:\x\b.txt", r"C:\x\c.txt"].map(PathBuf::from));
     }
 }

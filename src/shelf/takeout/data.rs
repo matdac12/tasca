@@ -13,7 +13,7 @@ use windows::Win32::System::Com::{
     CoTaskMemFree, IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{ReleaseStgMedium, CF_HDROP};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
@@ -84,7 +84,13 @@ fn hdrop(paths: &[PathBuf]) -> Result<IDataObject> {
 fn set_hglobal(obj: &IDataObject, cf: u16, bytes: &[u8]) -> Result<()> {
     unsafe {
         let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), GlobalLock(h) as *mut u8, bytes.len());
+        let p = GlobalLock(h) as *mut u8;
+        if p.is_null() {
+            let e = windows::core::Error::from_thread();
+            let _ = GlobalFree(Some(h));
+            return Err(e);
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
         let _ = GlobalUnlock(h);
         let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: ManuallyDrop::new(None) };
         obj.SetData(&hglobal_format(cf), &medium, true).inspect_err(|_| {
@@ -101,7 +107,8 @@ pub fn read_dword(obj: &IDataObject, name: PCWSTR) -> Option<u32> {
         let mut m = obj.GetData(&hglobal_format(cf)).ok()?;
         let h = m.u.hGlobal;
         let p = GlobalLock(h) as *const u32;
-        let v = (!p.is_null()).then(|| p.read_unaligned());
+        // A target may write fewer bytes than a DWORD: no reading past them.
+        let v = (!p.is_null() && GlobalSize(h) >= size_of::<u32>()).then(|| p.read_unaligned());
         let _ = GlobalUnlock(h);
         ReleaseStgMedium(&mut m);
         v
