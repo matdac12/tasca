@@ -3,16 +3,28 @@
 //! dark tile with the extension (PDF in red). TASCA-17 owns this file and puts
 //! real shell thumbnails in front of these, keeping them as the fallback.
 
+use std::collections::HashMap;
+
+use windows_numerics::Matrix3x2;
+
 use windows::core::{Result, HSTRING};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F};
-use windows::Win32::Graphics::Direct2D::{ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_CLIP};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1Bitmap, ID2D1RenderTarget, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteTextFormat, DWRITE_FONT_WEIGHT_BOLD, DWRITE_MEASURING_MODE_NATURAL,
     DWRITE_TEXT_ALIGNMENT_CENTER,
 };
 
 use super::model::Item;
+use super::model::ItemId;
 use super::render::{rr, text_format, wide};
+use crate::thumbs::{self, Key};
 
 pub const TILE: f32 = 30.0;
 const TILE_RADIUS: f32 = 6.0;
@@ -25,16 +37,48 @@ const LABEL: (f32, f32, f32, f32) = (1.0, 1.0, 1.0, 0.56);
 
 pub struct Tiles {
     label: IDWriteTextFormat,
+    /// D2D copies of the cached thumbnails, made lazily on the current target.
+    bitmaps: HashMap<Key, ID2D1Bitmap>,
 }
 
 impl Tiles {
     pub fn new(dw: &IDWriteFactory, family: &HSTRING) -> Result<Self> {
-        Ok(Self { label: text_format(dw, family, 7.5, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER, true)? })
+        Ok(Self {
+            label: text_format(dw, family, 7.5, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER, true)?,
+            bitmaps: HashMap::new(),
+        })
     }
 
     /// The render target was recreated: drop anything made on the old one
-    /// (D2D bitmaps). Nothing yet.
-    pub fn target_reset(&mut self) {}
+    /// (D2D bitmaps). The pixels stay cached in `thumbs`.
+    pub fn target_reset(&mut self) {
+        self.bitmaps.clear();
+    }
+
+    /// Forget bitmaps whose thumbnail left the cache (Item removed, DPI changed).
+    pub fn sync(&mut self) {
+        self.bitmaps.retain(|k, _| thumbs::has(*k));
+    }
+
+    /// The D2D bitmap for `id` at the target's DPI, if its thumbnail is cached.
+    fn bitmap(&mut self, rt: &ID2D1RenderTarget, id: ItemId) -> Option<(ID2D1Bitmap, u32, u32)> {
+        let (mut dx, mut dy) = (0.0, 0.0);
+        unsafe { rt.GetDpi(&mut dx, &mut dy) };
+        let key = Key::new(id, dx);
+        let thumb = thumbs::get(key)?;
+        if let Some(b) = self.bitmaps.get(&key) {
+            return Some((b.clone(), thumb.w, thumb.h));
+        }
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: dx,
+            dpiY: dy,
+        };
+        let size = D2D_SIZE_U { width: thumb.w, height: thumb.h };
+        let b = unsafe { rt.CreateBitmap(size, Some(thumb.bgra.as_ptr() as *const _), thumb.w * 4, &props) }.ok()?;
+        self.bitmaps.insert(key, b.clone());
+        Some((b, thumb.w, thumb.h))
+    }
 
     /// Draw `item`'s tile into `r` (a TILE x TILE DIP square). `opacity`
     /// multiplies everything (missing rows are drawn at 45 %).
@@ -45,6 +89,24 @@ impl Tiles {
             };
             let image = item.is_image();
             rt.FillRoundedRectangle(&rr(r.left, r.top, r.right, r.bottom, TILE_RADIUS), &brush(if image { ROSE } else { DARK })?);
+            if let Some((bmp, w, h)) = self.bitmap(rt, item.id) {
+                // The bitmap carries the target's DPI, so its DIP size is its pixels / scale.
+                let (mut dx, mut dy) = (0.0, 0.0);
+                rt.GetDpi(&mut dx, &mut dy);
+                let (bw, bh) = (w as f32 * 96.0 / dx, h as f32 * 96.0 / dy);
+                let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                let dest = D2D_RECT_F { left: cx - bw / 2.0, top: cy - bh / 2.0, right: cx + bw / 2.0, bottom: cy + bh / 2.0 };
+                if (bw - TILE).abs() < 0.75 && (bh - TILE).abs() < 0.75 {
+                    // Fills the tile: clip to the rounded corners with a bitmap brush.
+                    let bb = rt.CreateBitmapBrush(&bmp, None, None)?;
+                    bb.SetOpacity(opacity);
+                    bb.SetTransform(&Matrix3x2::translation(dest.left, dest.top));
+                    rt.FillRoundedRectangle(&rr(r.left, r.top, r.right, r.bottom, TILE_RADIUS), &bb);
+                } else {
+                    rt.DrawBitmap(&bmp, Some(&dest), opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                }
+                return Ok(());
+            }
             if item.is_folder() {
                 let f = brush(FOLDER)?;
                 let (x, y) = (r.left, r.top);

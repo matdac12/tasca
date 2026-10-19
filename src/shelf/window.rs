@@ -19,7 +19,7 @@ use super::layout::{past_drag_threshold, Hit};
 use super::model::{ItemId, Mods};
 use super::{open, takeout, with, Press, Shelf, T_ANIM};
 use crate::log::log;
-use crate::proto::WM_PROBED;
+use crate::proto::{WM_PROBED, WM_THUMB_READY};
 
 /// Not exported by the `windows` features we enable (it lives in UI_Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -60,6 +60,7 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         // The Shelf positions itself on every show; ignore the suggested rect.
         WM_DPICHANGED => {}
         WM_PROBED => super::on_probed(),
+        WM_THUMB_READY => super::on_thumb_ready(),
         WM_MOUSEMOVE => mouse_move(hwnd, wp, lp),
         WM_MOUSELEAVE => {
             with(|s| {
