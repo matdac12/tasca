@@ -16,8 +16,7 @@ pub const WM_QUIT_RESIDENT: u32 = WM_APP + 3;
 
 /// TASCA-13: file facts from a probe thread. `lParam` = `Box<shelf::probe::Probed>`.
 pub const WM_PROBED: u32 = WM_APP + 4;
-/// Reserved for TASCA-17: a row thumbnail is ready. No handler yet.
-#[allow(dead_code)]
+/// TASCA-17: a row thumbnail landed in `thumbs`' cache. No pointer in the message.
 pub const WM_THUMB_READY: u32 = WM_APP + 16;
 /// Reserved for TASCA-16: a Park / Materialize finished on its worker. No handler yet.
 #[allow(dead_code)]

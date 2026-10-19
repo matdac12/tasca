@@ -40,6 +40,7 @@ use crate::log::{log, now_ms};
 use anim::{Anim, AnimKind};
 use layout::{Layout, WorkArea, SLIDE_IN_DIP, SLIDE_OUT_DIP};
 use model::{ItemId, Kind, Model};
+use crate::thumbs;
 use render::{Renderer, View};
 
 const T_ANIM: usize = 1;
@@ -138,6 +139,10 @@ impl Shelf {
         if self.press.as_ref().is_some_and(|p| self.model.get(p.id).is_none()) {
             self.press = None;
         }
+        // Free thumbnails of Items that left and of other DPIs.
+        let model = &self.model;
+        thumbs::retain((self.layout.scale * 96.0).round() as u32, |id| model.get(id).is_some());
+        self.renderer.tiles_mut().sync();
         let view = View { layout: &self.layout, model: &self.model, hover: self.hover, scroll: self.scroll, hot: self.hot };
         if let Err(e) = self.renderer.render(&view) {
             log(format!("render failed: {e:?}"));
@@ -230,9 +235,16 @@ pub fn create(hwnd: HWND) -> Result<()> {
 }
 
 /// The one place where background work on Items' files starts: when Items
-/// appear (`recheck` false) and on every show (`recheck` true). Today that is
-/// the probe (exists, folder, size); TASCA-17 adds thumbnail requests here.
+/// appear (`recheck` false) and on every show (`recheck` true): the probe
+/// (exists, folder, size) and the thumbnails (cached ones are skipped).
 fn files_need_work(hwnd: HWND, jobs: Vec<(ItemId, Vec<PathBuf>)>, recheck: bool) {
+    let picks = with(|s| {
+        let items = jobs.iter().filter_map(|(id, _)| s.model.get(*id)).map(|i| (i.id, i.files[0].clone(), i.is_image()));
+        (s.layout.scale, items.collect::<Vec<_>>())
+    });
+    if let Some((scale, items)) = picks {
+        thumbs::request(hwnd, scale, items);
+    }
     probe::request(hwnd, jobs, recheck);
 }
 
@@ -245,6 +257,17 @@ fn on_probed() {
             changed |= s.model.set_facts(id, facts);
         }
         if changed {
+            s.refresh();
+        }
+    });
+}
+
+/// `WM_THUMB_READY`: a thumbnail landed in the cache. Hidden, the next show
+/// renders it anyway.
+fn on_thumb_ready() {
+    with(|s| {
+        if s.visible {
+            log(format!("thumbnail arrived at {:.1} ms", now_ms()));
             s.refresh();
         }
     });
