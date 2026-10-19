@@ -118,7 +118,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         shelf::create(hwnd)?;
         // Then OLE: the Shelf is a drop target from now on, shown or not.
         park::register(hwnd);
-        park::sweep_old_drops();
+        park::sweep::start();
 
         let pmv2 = AreDpiAwarenessContextsEqual(
             GetThreadDpiAwarenessContext(),

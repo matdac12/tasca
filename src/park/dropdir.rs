@@ -2,8 +2,7 @@
 //! (spec §4). Ids are monotonic and unique, also across resident restarts, so
 //! folders sort by age and a new Park never lands in an old folder.
 //!
-//! Names inside them: `names` (planned, for Materialized files) and
-//! `free_name` (on disk, for rule 1's copies). Old folders: `sweep`.
+//! Names inside them come from `names`; old folders go in `sweep`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -86,21 +85,6 @@ pub fn create() -> io::Result<PathBuf> {
     }
 }
 
-/// A path in `dir` for a file called `name` that does not exist yet:
-/// `name`, else `stem (2).ext`, `stem (3).ext`, ... The file system answers
-/// case-insensitively.
-pub fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
-    let first = dir.join(name);
-    if !first.exists() {
-        return first;
-    }
-    let name = name.to_string_lossy();
-    (2..)
-        .map(|n| dir.join(super::names::numbered(&name, n)))
-        .find(|c| !c.exists())
-        .expect("an unused name")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,18 +110,5 @@ mod tests {
         assert!(id(&b) > id(&a));
         std::fs::remove_dir(a).unwrap();
         std::fs::remove_dir(b).unwrap();
-    }
-
-    #[test]
-    fn free_name_counts_up_past_existing_files() {
-        let dir = create().unwrap();
-        assert_eq!(free_name(&dir, "a.txt".as_ref()), dir.join("a.txt"));
-        std::fs::write(dir.join("a.txt"), b"1").unwrap();
-        assert_eq!(free_name(&dir, "A.TXT".as_ref()), dir.join("A (2).TXT"));
-        std::fs::write(dir.join("a (2).txt"), b"2").unwrap();
-        assert_eq!(free_name(&dir, "a.txt".as_ref()), dir.join("a (3).txt"));
-        std::fs::create_dir(dir.join("folder")).unwrap();
-        assert_eq!(free_name(&dir, "folder".as_ref()), dir.join("folder (2)"));
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

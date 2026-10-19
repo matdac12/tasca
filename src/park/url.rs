@@ -7,17 +7,15 @@ use windows::core::w;
 use windows::Win32::System::Com::IDataObject;
 use windows::Win32::UI::Shell::{CFSTR_INETURLA, CFSTR_INETURLW};
 
-use super::formats::{self, offers, registered};
+use super::formats::{self, registered};
 use super::{names, one_file, Park};
 
 pub fn offered(obj: &IDataObject) -> bool {
-    offers(obj, registered(CFSTR_INETURLW)) || offers(obj, registered(CFSTR_INETURLA))
+    formats::offers_either(obj, registered(CFSTR_INETURLW), registered(CFSTR_INETURLA))
 }
 
 pub fn park(obj: &IDataObject) -> Option<Park> {
-    let url = formats::hglobal_bytes(obj, registered(CFSTR_INETURLW))
-        .map(|b| formats::utf16_z(&b))
-        .or_else(|| formats::hglobal_bytes(obj, registered(CFSTR_INETURLA)).map(|b| formats::ansi_z(&b)))?;
+    let url = formats::text(obj, registered(CFSTR_INETURLW), registered(CFSTR_INETURLA))?;
     let url = url.trim();
     if url.is_empty() {
         return None;

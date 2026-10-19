@@ -111,17 +111,21 @@ pub struct Planner {
     taken: HashSet<String>,
     /// A folder's source path (lower case, `\`) → its planned relative path.
     dirs: HashMap<String, PathBuf>,
+    /// The next number to try for a wanted path (lower case): many
+    /// same-named entries don't each count up from 2.
+    next: HashMap<String, u32>,
 }
 
 impl Planner {
     /// A free name for `name` in the planned folder `parent`.
     fn unique(&mut self, parent: &Path, name: &str) -> PathBuf {
         let key = |p: &Path| p.to_string_lossy().to_lowercase();
-        let mut rel = parent.join(name);
-        let mut n = 2;
+        let wanted = parent.join(name);
+        let mut rel = wanted.clone();
+        let n = self.next.entry(key(&wanted)).or_insert(2);
         while self.taken.contains(&key(&rel)) {
-            rel = parent.join(numbered(name, n));
-            n += 1;
+            rel = parent.join(numbered(name, *n));
+            *n += 1;
         }
         self.taken.insert(key(&rel));
         rel

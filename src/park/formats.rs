@@ -13,7 +13,7 @@ use windows::Win32::System::DataExchange::{GetClipboardFormatNameW, RegisterClip
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{
     CF_BITMAP, CF_DIB, CF_DIBV5, CF_ENHMETAFILE, CF_HDROP, CF_LOCALE, CF_METAFILEPICT, CF_OEMTEXT, CF_TEXT,
-    CF_UNICODETEXT, CLIPBOARD_FORMAT, ReleaseStgMedium,
+    CF_UNICODETEXT, CLIPBOARD_FORMAT, DROPEFFECT, ReleaseStgMedium,
 };
 
 /// The id of a registered format (`FileContents`, `PNG`, ...); 0 if it
@@ -74,7 +74,28 @@ pub fn ansi(bytes: &[u8]) -> String {
 
 /// A format asked for as an `HGLOBAL`.
 pub fn hglobal_format(cf: u16) -> FORMATETC {
-    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 }
+    format(cf, -1, TYMED_HGLOBAL.0 as u32)
+}
+
+/// `cf` at `lindex` (`-1`: all of it), on any of the `tymed` media.
+pub fn format(cf: u16, lindex: i32, tymed: u32) -> FORMATETC {
+    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex, tymed }
+}
+
+/// The object offers the wide or the ANSI form of a format.
+pub fn offers_either(obj: &IDataObject, wide: u16, ansi: u16) -> bool {
+    offers(obj, wide) || offers(obj, ansi)
+}
+
+/// Text from the wide format (UTF-16), else the ANSI one, up to the first NUL.
+pub fn text(obj: &IDataObject, wide: u16, ansi: u16) -> Option<String> {
+    hglobal_bytes(obj, wide).map(|b| utf16_z(&b)).or_else(|| hglobal_bytes(obj, ansi).map(|b| ansi_z(&b)))
+}
+
+/// A drop effect for the log: `COPY`, `MOVE|LINK`, `NONE`, ...
+pub fn effect_name(e: DROPEFFECT) -> String {
+    let s = flag_names(e.0, &[(1, "COPY"), (2, "MOVE"), (4, "LINK")]);
+    if s.is_empty() { "NONE".into() } else { s }
 }
 
 /// The object offers `cf` as an `HGLOBAL`. `QueryGetData` only: it renders

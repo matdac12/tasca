@@ -377,25 +377,24 @@ fn tick() {
 /// Add an Item on top (a Park). Scrolls to the top so it is seen, re-renders,
 /// and probes its files off the UI thread. `files` must not be empty.
 pub fn add_top(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
+    add(files, kind, false)
+}
+
+/// Add an Item whose files are still being written (TASCA-16): shown at once
+/// as "Saving…", not probed until `filled`.
+pub fn add_pending(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
+    add(files, kind, true)
+}
+
+fn add(files: Vec<PathBuf>, kind: Kind, pending: bool) -> Option<ItemId> {
     let (hwnd, id, jobs) = with(|s| {
-        let id = s.model.add_top(files, kind);
+        let id = if pending { s.model.add_pending(files, kind) } else { s.model.add_top(files, kind) };
         s.scroll = 0.0;
         s.refresh();
         (s.hwnd, id, s.file_jobs(Some(&[id])))
     })?;
     files_need_work(hwnd, jobs, false);
     Some(id)
-}
-
-/// Add an Item whose files are still being written (TASCA-16): shown at once
-/// as "Saving…", not probed until `filled`.
-pub fn add_pending(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
-    with(|s| {
-        let id = s.model.add_pending(files, kind);
-        s.scroll = 0.0;
-        s.refresh();
-        id
-    })
 }
 
 /// A pending Item's files are written: keep these, probe them and load the

@@ -10,6 +10,7 @@
 //! Otherwise each entry's medium is taken in `Drop` (bytes copied, streams
 //! and storages marshalled) and the worker writes them.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
@@ -18,15 +19,14 @@ use windows::Win32::UI::Shell::{
     CFSTR_FILEDESCRIPTORA, CFSTR_FILEDESCRIPTORW, FD_ATTRIBUTES, FD_FILESIZE, FD_FLAGS, FILEDESCRIPTORA, FILEDESCRIPTORW,
 };
 
-use super::job::{self, Async, Entry, Job};
+use super::job::{self, Entry, Writes};
 use super::names::{split_relative, Planner};
 use super::{dropdir, formats, Park, Parked};
 use crate::log::log;
 use crate::shelf::model::Kind;
 
 pub fn offered(obj: &IDataObject) -> bool {
-    formats::offers(obj, formats::registered(CFSTR_FILEDESCRIPTORW))
-        || formats::offers(obj, formats::registered(CFSTR_FILEDESCRIPTORA))
+    formats::offers_either(obj, formats::registered(CFSTR_FILEDESCRIPTORW), formats::registered(CFSTR_FILEDESCRIPTORA))
 }
 
 fn descriptor(obj: &IDataObject) -> Option<Vec<Desc>> {
@@ -55,28 +55,20 @@ pub fn park(obj: &IDataObject) -> Option<Park> {
         return None;
     }
     let dir = dropdir::create().inspect_err(|e| log(format!("no drop folder: {e}"))).ok()?;
-    let (entries, source) = match job::start_async(obj) {
-        Async::Carried(c) => {
-            let entries = plan
-                .iter()
-                .map(|(i, rel, d)| if d.is_dir { Entry::dir(dir.join(rel)) } else { Entry::contents(dir.join(rel), *i, d.size) })
-                .collect();
-            (entries, Some(c))
-        }
-        Async::Here(cap) => {
-            let entries = take_now(obj, &dir, &plan);
-            job::end(&cap, !entries.is_empty());
-            (entries, None)
-        }
-        Async::No => (take_now(obj, &dir, &plan), None),
+    let source = job::start_async(obj);
+    let entries: Vec<Entry> = match source {
+        Some(_) => plan
+            .iter()
+            .map(|(i, rel, d)| if d.is_dir { Entry::dir(dir.join(rel)) } else { Entry::contents(dir.join(rel), *i, d.size) })
+            .collect(),
+        None => take_now(obj, &dir, &plan),
     };
     if entries.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
     let files = tops(&dir, entries.iter().map(|e| e.path.as_path()));
-    let job = Job::write(dir, files.clone(), entries, source);
-    Some(Park::Planned(Parked { files, kind: Kind::Materialized }, job))
+    Some(Park::Planned(Parked { files: files.clone(), kind: Kind::Materialized }, Writes { dir, files, entries, source }))
 }
 
 /// Take each entry's contents now (no async operation keeps the source's
@@ -98,16 +90,12 @@ fn take_now(obj: &IDataObject, dir: &Path, plan: &[(i32, PathBuf, &Desc)]) -> Ve
 
 /// The Item's files: the top-level entries of the drop folder, in order.
 fn tops<'a>(dir: &Path, paths: impl Iterator<Item = &'a Path>) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        if let Some(first) = p.strip_prefix(dir).ok().and_then(|r| r.components().next()) {
-            let top = dir.join(first);
-            if !out.contains(&top) {
-                out.push(top);
-            }
-        }
-    }
-    out
+    let mut seen = HashSet::new();
+    paths
+        .filter_map(|p| p.strip_prefix(dir).ok()?.components().next())
+        .filter(|first| seen.insert(*first))
+        .map(|first| dir.join(first))
+        .collect()
 }
 
 /// One entry of a file group descriptor.
@@ -140,8 +128,7 @@ pub fn parse(bytes: &[u8], wide: bool) -> Vec<Desc> {
             } else {
                 let d = unsafe { std::ptr::read_unaligned(c.as_ptr() as *const FILEDESCRIPTORA) };
                 let n = d.cFileName.map(|b| b as u8);
-                let len = n.iter().position(|&b| b == 0).unwrap_or(n.len());
-                (d.dwFlags, d.dwFileAttributes, d.nFileSizeHigh, d.nFileSizeLow, formats::ansi(&n[..len]))
+                (d.dwFlags, d.dwFileAttributes, d.nFileSizeHigh, d.nFileSizeLow, formats::ansi_z(&n))
             };
             let has = |f: FD_FLAGS| flags & f.0 as u32 != 0;
             Desc {

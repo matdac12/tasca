@@ -2,9 +2,9 @@
 //!
 //! - `target`: the `IDropTarget`, the effect, and `READERS`, the per-format
 //!   dispatch `Drop` runs through.
-//! - The readers, in the spec's order: `hdrop` (rule 1, `CF_HDROP`, temp paths
-//!   copied), `async_hdrop` (2), `virtual_files` (3), `url` (4), `text` (5),
-//!   `png` (6).
+//! - The readers, in the spec's order: `hdrop` (rules 1 and 2, `CF_HDROP`,
+//!   temp paths copied, delay-rendered ones read on a worker),
+//!   `virtual_files` (3), `url` (4), `text` (5), `png` (6).
 //! - `job`: the worker threads that write Materialized files and read async
 //!   drops; they report back through `WM_PARK_DONE` (`on_done`).
 //! - `dropdir`: `%TEMP%\Tasca\<drop-id>\` folders. `names`: the names of the
@@ -12,18 +12,17 @@
 //! - `rules`: the pure rules. `formats`: clipboard-format helpers.
 //!
 //! The resident calls `register` once at startup (window created, still
-//! hidden), `sweep_old_drops` once, `revoke` on `WM_DESTROY`, `uninit` after
-//! the message loop, and `on_done` on `WM_PARK_DONE`.
+//! hidden), `sweep::start` once, `revoke` on `WM_DESTROY`, `uninit` after the
+//! message loop, and `on_done` on `WM_PARK_DONE`.
 
-mod async_hdrop;
 pub mod dropdir;
-mod formats;
+pub(crate) mod formats;
 mod hdrop;
 mod job;
 mod names;
 mod png;
 pub mod rules;
-mod sweep;
+pub mod sweep;
 mod target;
 #[cfg(test)]
 mod testobj;
@@ -53,9 +52,9 @@ pub struct Parked {
 pub enum Park {
     /// The files exist now (rule 1).
     Ready(Parked),
-    /// The files are planned in a drop folder; the job writes them on a
-    /// worker. The Item shows at once, pending, and fills in when they land.
-    Planned(Parked, job::Job),
+    /// The files are planned in a drop folder and written on a worker. The
+    /// Item shows at once, pending, and fills in when they land.
+    Planned(Parked, job::Writes),
     /// The job reads the drop on a worker and Parks what it finds (rule 2:
     /// nothing is known until the source renders).
     Later(job::Job),
@@ -76,8 +75,9 @@ impl Park {
 fn one_file(name: &str, bytes: Vec<u8>) -> Option<Park> {
     let dir = dropdir::create().inspect_err(|e| log(format!("no drop folder: {e}"))).ok()?;
     let path = dir.join(name);
-    let job = job::Job::write(dir, vec![path.clone()], vec![job::Entry::bytes(path.clone(), bytes)], None);
-    Some(Park::Planned(Parked { files: vec![path], kind: Kind::Materialized }, job))
+    let entries = vec![job::Entry::bytes(path.clone(), bytes)];
+    let writes = job::Writes { dir, files: vec![path.clone()], entries, source: None };
+    Some(Park::Planned(Parked { files: vec![path], kind: Kind::Materialized }, writes))
 }
 
 /// Put a Park on the Shelf: the same path set as an Item already there moves
@@ -100,19 +100,23 @@ pub fn place(p: Parked) {
 fn land(hwnd: HWND, park: Park) {
     match park {
         Park::Ready(p) => place(p),
-        Park::Planned(p, job) => {
-            let id = shelf::add_pending(p.files, p.kind);
-            start(hwnd, job, id);
-        }
-        Park::Later(job) => start(hwnd, job, None),
+        Park::Planned(p, writes) => match shelf::add_pending(p.files, p.kind) {
+            Some(id) => start(hwnd, job::Job::Write(id, writes)),
+            None => log("the Shelf is busy: drop dropped"),
+        },
+        Park::Later(job) => start(hwnd, job),
     }
 }
 
-fn start(hwnd: HWND, job: job::Job, id: Option<shelf::model::ItemId>) {
+fn start(hwnd: HWND, job: job::Job) {
+    let item = match &job {
+        job::Job::Write(id, _) => Some(*id),
+        job::Job::Hdrop(_) => None,
+    };
     let to = hwnd.0 as isize;
-    if let Err(e) = job::spawn(job, id, move |done| job::deliver(to, done)) {
+    if let Err(e) = job::spawn(job, move |done| job::deliver(to, done)) {
         log(format!("no worker for the drop: {e}"));
-        if let Some(id) = id {
+        if let Some(id) = item {
             shelf::remove(&[id]);
         }
     }
@@ -123,22 +127,16 @@ fn start(hwnd: HWND, job: job::Job, id: Option<shelf::model::ItemId>) {
 pub fn on_done() {
     for done in job::take() {
         match done {
-            job::Done::Filled(Some(id), files) => {
+            job::Done::Filled(id, files) => {
                 log(format!("Item {id}: {} file(s) written", files.len()));
                 shelf::filled(id, files);
             }
-            job::Done::Filled(None, _) => {}
             job::Done::Parked(p) => {
                 log(format!("async drop: {} file(s), {:?}", p.files.len(), p.kind));
                 place(p);
             }
         }
     }
-}
-
-/// Delete old drop folders, off the UI thread (once, at resident start).
-pub fn sweep_old_drops() {
-    sweep::start();
 }
 
 thread_local! {
@@ -190,15 +188,13 @@ pub fn uninit() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem::ManuallyDrop;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
 
     use windows::core::HSTRING;
     use windows::Win32::Foundation::POINT;
     use windows::Win32::Storage::FileSystem::GetShortPathNameW;
-    use windows::Win32::System::Com::{IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL};
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Com::IDataObject;
     use windows::Win32::System::Ole::CF_HDROP;
     use windows::Win32::UI::Shell::{SHCreateDataObject, DROPFILES};
 
@@ -210,7 +206,7 @@ mod tests {
         CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW, CFSTR_INETURLA, CFSTR_INETURLW, FD_ATTRIBUTES, FD_FILESIZE,
     };
 
-    use super::testobj::{pump_until, As, Source};
+    use super::testobj::{self, pump_until, As, Source};
     use super::virtual_files::tests::group_w;
     use crate::shelf::model::{ItemId, Model};
 
@@ -223,13 +219,7 @@ mod tests {
     }
 
     fn set_hglobal(obj: &IDataObject, cf: u16, bytes: &[u8]) {
-        unsafe {
-            let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).unwrap();
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), GlobalLock(h) as *mut u8, bytes.len());
-            let _ = GlobalUnlock(h);
-            let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: ManuallyDrop::new(None) };
-            obj.SetData(&formats::hglobal_format(cf), &medium, true).unwrap();
-        }
+        unsafe { obj.SetData(&formats::hglobal_format(cf), &testobj::hglobal(bytes), true) }.unwrap();
     }
 
     /// `DROPFILES` with these paths, wide.
@@ -256,17 +246,17 @@ mod tests {
         }
     }
 
-    fn planned(p: Option<Park>) -> (Parked, job::Job) {
+    fn planned(p: Option<Park>, item: ItemId) -> (Parked, job::Job) {
         match p {
-            Some(Park::Planned(p, j)) => (p, j),
+            Some(Park::Planned(p, w)) => (p, job::Job::Write(item, w)),
             other => panic!("expected a planned Park, got {:?}", other.map(|p| p.describe())),
         }
     }
 
     /// Run a job on its worker thread, pumping this thread's messages meanwhile.
-    fn run(job: job::Job, item: Option<ItemId>) -> Option<job::Done> {
+    fn run(job: job::Job) -> Option<job::Done> {
         let (tx, rx) = std::sync::mpsc::channel();
-        job::spawn(job, item, move |d| {
+        job::spawn(job, move |d| {
             let _ = tx.send(d);
         })
         .unwrap();
@@ -446,13 +436,13 @@ mod tests {
         let obj: IDataObject = source.into();
         assert!(target::supported(&obj));
 
-        let (p, job) = planned(target::read(&obj));
+        let (p, job) = planned(target::read(&obj), 7);
         assert_eq!(p.kind, Kind::Materialized);
         assert_eq!(names(&p.files), ["report_ final.pdf"]);
         assert_eq!(p.files[0].parent().unwrap().parent(), Some(dropdir::root().as_path()));
         assert!(!p.files[0].exists(), "written on the worker, not in Drop");
 
-        assert_eq!(run(job, Some(7)), Some(job::Done::Filled(Some(7), p.files.clone())));
+        assert_eq!(run(job), Some(job::Done::Filled(7, p.files.clone())));
         assert_eq!(std::fs::read(&p.files[0]).unwrap(), bytes);
         std::fs::remove_dir_all(drop_dir_of(&p.files)).unwrap();
     }
@@ -478,10 +468,10 @@ mod tests {
         let ended = source.ended();
         let obj: IDataObject = source.into();
 
-        let (p, job) = planned(target::read(&obj));
+        let (p, job) = planned(target::read(&obj), 3);
         assert_eq!(names(&p.files), ["Folder", "top.txt"]);
         assert_eq!(*ended.borrow(), None);
-        assert_eq!(run(job, Some(3)), Some(job::Done::Filled(Some(3), p.files.clone())));
+        assert_eq!(run(job), Some(job::Done::Filled(3, p.files.clone())));
         assert_eq!(*ended.borrow(), Some((S_OK, COPY)));
 
         let dir = drop_dir_of(&p.files);
@@ -497,9 +487,9 @@ mod tests {
         let source = Source::new(false)
             .with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &group_w(&[("ok.txt", 0, 0, 0), ("gone.txt", 0, 0, 0)], 2))
             .with(cf(CFSTR_FILECONTENTS), 0, As::HGlobal, b"ok");
-        let (p, job) = planned(target::read(&source.into()));
+        let (p, job) = planned(target::read(&source.into()), 1);
         assert_eq!(names(&p.files), ["ok.txt"]);
-        assert_eq!(run(job, Some(1)), Some(job::Done::Filled(Some(1), p.files.clone())));
+        assert_eq!(run(job), Some(job::Done::Filled(1, p.files.clone())));
         std::fs::remove_dir_all(drop_dir_of(&p.files)).unwrap();
 
         // Nothing readable: no Park.
@@ -512,16 +502,16 @@ mod tests {
         let source = Source::new(true)
             .with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &group_w(&[("ok.txt", 0, 0, 0), ("gone.txt", 0, 0, 0)], 2))
             .with(cf(CFSTR_FILECONTENTS), 0, As::HGlobal, b"ok");
-        let (p, job) = planned(target::read(&source.into()));
+        let (p, job) = planned(target::read(&source.into()), 1);
         assert_eq!(names(&p.files), ["ok.txt", "gone.txt"]);
-        assert_eq!(run(job, Some(1)), Some(job::Done::Filled(Some(1), p.files[..1].to_vec())));
+        assert_eq!(run(job), Some(job::Done::Filled(1, p.files[..1].to_vec())));
         assert!(!p.files[1].exists());
         std::fs::remove_dir_all(drop_dir_of(&p.files)).unwrap();
 
         let source = Source::new(true).with(cf(CFSTR_FILEDESCRIPTORW), -1, As::HGlobal, &group_w(&[("gone.txt", 0, 0, 0)], 1));
         let ended = source.ended();
-        let (p, job) = planned(target::read(&source.into()));
-        assert_eq!(run(job, Some(2)), Some(job::Done::Filled(Some(2), vec![])));
+        let (p, job) = planned(target::read(&source.into()), 2);
+        assert_eq!(run(job), Some(job::Done::Filled(2, vec![])));
         assert!(!p.files[0].parent().unwrap().exists(), "the empty drop folder is removed");
         assert_eq!(*ended.borrow(), Some((E_FAIL, 0)));
     }
@@ -535,7 +525,7 @@ mod tests {
         assert!(target::supported(&obj));
 
         let Some(Park::Later(job)) = target::read(&obj) else { panic!("expected a later Park") };
-        let Some(job::Done::Parked(p)) = run(job, None) else { panic!("expected a Park") };
+        let Some(job::Done::Parked(p)) = run(job) else { panic!("expected a Park") };
         assert_eq!(p.kind, Kind::Materialized);
         assert_eq!(names(&p.files), ["report.pdf"]);
         assert_eq!(*ended.borrow(), Some((S_OK, COPY)));
@@ -551,9 +541,9 @@ mod tests {
 
     /// Plan, write, and return the one file with its bytes.
     fn one(obj: IDataObject) -> (String, Vec<u8>) {
-        let (p, job) = planned(target::read(&obj));
+        let (p, job) = planned(target::read(&obj), 1);
         assert_eq!(p.files.len(), 1);
-        assert_eq!(run(job, Some(1)), Some(job::Done::Filled(Some(1), p.files.clone())));
+        assert_eq!(run(job), Some(job::Done::Filled(1, p.files.clone())));
         let bytes = std::fs::read(&p.files[0]).unwrap();
         std::fs::remove_dir_all(p.files[0].parent().unwrap()).unwrap();
         (names(&p.files)[0].to_owned(), bytes)
@@ -607,7 +597,7 @@ mod tests {
     #[test]
     fn readers_follow_the_spec_order() {
         let order: Vec<&str> = target::READERS.iter().map(|r| r.name).collect();
-        assert_eq!(order, ["CF_HDROP", "async CF_HDROP", "FileGroupDescriptor", "UniformResourceLocator", "text", "PNG"]);
+        assert_eq!(order, ["CF_HDROP", "FileGroupDescriptor", "UniformResourceLocator", "text", "PNG"]);
         // A browser link offers a virtual .url file, a URL and text: the file wins.
         let source = Source::new(false)
             .with(CF_UNICODETEXT.0, -1, As::HGlobal, &utf16z("https://example.com/"))

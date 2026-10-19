@@ -9,10 +9,11 @@
 //! operation for us (`IDataObjectAsyncCapability`), the worker ends it after
 //! the reads: until then the source keeps its data alive.
 
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::mem::ManuallyDrop;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use windows::core::{IUnknown, Interface, HSTRING};
@@ -22,9 +23,8 @@ use windows::Win32::System::Com::StructuredStorage::{
     CoGetInterfaceAndReleaseStream, IStorage, StgCreateStorageEx, STGFMT_STORAGE,
 };
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, IBindCtx, IDataObject, IStream, COINIT_MULTITHREADED, DVASPECT_CONTENT, FORMATETC,
-    STGC_DEFAULT, STGM, STGMEDIUM, STGM_READWRITE, STGM_SHARE_EXCLUSIVE, STREAM_SEEK_SET, TYMED_HGLOBAL, TYMED_ISTORAGE,
-    TYMED_ISTREAM,
+    CoInitializeEx, CoUninitialize, IBindCtx, IDataObject, IStream, COINIT_MULTITHREADED, STGC_DEFAULT, STGM,
+    STGMEDIUM, STGM_READWRITE, STGM_SHARE_EXCLUSIVE, STREAM_SEEK_SET, TYMED_HGLOBAL, TYMED_ISTORAGE, TYMED_ISTREAM,
 };
 use windows::Win32::System::Ole::{ReleaseStgMedium, DROPEFFECT_COPY, DROPEFFECT_NONE};
 use windows::Win32::UI::Shell::{IDataObjectAsyncCapability, CFSTR_FILECONTENTS};
@@ -42,7 +42,7 @@ pub const CHUNK: usize = 16 * 1024 * 1024;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Done {
     /// The pending Item's files that were written; none = the Item goes.
-    Filled(Option<ItemId>, Vec<PathBuf>),
+    Filled(ItemId, Vec<PathBuf>),
     /// An async drop, read: put it on the Shelf.
     Parked(Parked),
 }
@@ -55,7 +55,7 @@ pub struct Carried(IStream);
 unsafe impl Send for Carried {}
 
 impl Carried {
-    pub fn new<T: Interface>(i: &T) -> windows::core::Result<Self> {
+    fn new<T: Interface>(i: &T) -> windows::core::Result<Self> {
         let unk: IUnknown = i.cast()?;
         unsafe { CoMarshalInterThreadInterfaceInStream(&T::IID, &unk) }.map(Self)
     }
@@ -105,31 +105,21 @@ impl Entry {
     /// now if it can't be marshalled.
     pub fn medium(path: PathBuf, m: STGMEDIUM, size: Option<u64>) -> io::Result<Self> {
         let m = Medium(m);
-        let what = match m.0.tymed {
-            t if t == TYMED_HGLOBAL.0 as u32 => What::Bytes(formats::global_bytes(unsafe { m.0.u.hGlobal }, size)),
-            t if t == TYMED_ISTREAM.0 as u32 => {
-                let s = m.stream()?;
-                match Carried::new(s) {
-                    Ok(c) => What::Stream(c),
-                    Err(e) => {
-                        log(format!("stream not marshalled ({e}), copying {} in Drop", path.display()));
-                        copy_stream(s, &path)?;
-                        What::Written
-                    }
-                }
+        let carried = match m.0.tymed {
+            t if t == TYMED_HGLOBAL.0 as u32 => {
+                return Ok(Self::bytes(path, formats::global_bytes(unsafe { m.0.u.hGlobal }, size)))
             }
-            t if t == TYMED_ISTORAGE.0 as u32 => {
-                let s = m.storage()?;
-                match Carried::new(s) {
-                    Ok(c) => What::Storage(c),
-                    Err(e) => {
-                        log(format!("storage not marshalled ({e}), saving {} in Drop", path.display()));
-                        save_storage(s, &path)?;
-                        What::Written
-                    }
-                }
+            t if t == TYMED_ISTREAM.0 as u32 => Carried::new(m.stream()?).map(What::Stream),
+            t if t == TYMED_ISTORAGE.0 as u32 => Carried::new(m.storage()?).map(What::Storage),
+            _ => return Err(m.unexpected()),
+        };
+        let what = match carried {
+            Ok(w) => w,
+            Err(e) => {
+                log(format!("not marshalled ({e}), writing {} in Drop", path.display()));
+                m.write(&path, size, &mut Vec::new())?;
+                What::Written
             }
-            t => return Err(io::Error::other(format!("unexpected medium (tymed {t})"))),
         };
         Ok(Self { path, what })
     }
@@ -146,6 +136,22 @@ impl Medium {
     fn storage(&self) -> io::Result<&IStorage> {
         unsafe { (*self.0.u.pstg).as_ref() }.ok_or_else(|| io::Error::other("no storage"))
     }
+
+    fn unexpected(&self) -> io::Error {
+        io::Error::other(format!("unexpected medium (tymed {})", self.0.tymed))
+    }
+
+    /// Write the contents to a new file at `path` (`buf`: the stream buffer).
+    fn write(&self, path: &Path, size: Option<u64>, buf: &mut Vec<u8>) -> io::Result<()> {
+        match self.0.tymed {
+            t if t == TYMED_HGLOBAL.0 as u32 => {
+                new_file(path)?.write_all(&formats::global_bytes(unsafe { self.0.u.hGlobal }, size))
+            }
+            t if t == TYMED_ISTREAM.0 as u32 => copy_stream(self.stream()?, path, buf),
+            t if t == TYMED_ISTORAGE.0 as u32 => save_storage(self.storage()?, path),
+            _ => Err(self.unexpected()),
+        }
+    }
 }
 
 impl Drop for Medium {
@@ -154,23 +160,27 @@ impl Drop for Medium {
     }
 }
 
+/// The planned files of one pending Item.
+pub struct Writes {
+    /// The drop folder.
+    pub dir: PathBuf,
+    /// The Item's (top-level) paths.
+    pub files: Vec<PathBuf>,
+    pub entries: Vec<Entry>,
+    /// The data object of an async operation (the worker ends it).
+    pub source: Option<Carried>,
+}
+
 pub enum Job {
-    /// Write `entries` into the drop folder `dir`; `files` are the Item's
-    /// (top-level) paths. `source`: the data object of an async operation.
-    Write { dir: PathBuf, files: Vec<PathBuf>, entries: Vec<Entry>, source: Option<Carried> },
+    /// Write the planned files of the pending Item.
+    Write(ItemId, Writes),
     /// Rule 2: read `CF_HDROP` from the data object of an async operation.
     Hdrop(Carried),
 }
 
-impl Job {
-    pub fn write(dir: PathBuf, files: Vec<PathBuf>, entries: Vec<Entry>, source: Option<Carried>) -> Self {
-        Job::Write { dir, files, entries, source }
-    }
-}
-
 /// Run `job` on a new worker thread; `report` gets its result there.
-pub fn spawn(job: Job, item: Option<ItemId>, report: impl FnOnce(Option<Done>) + Send + 'static) -> io::Result<()> {
-    std::thread::Builder::new().name("tasca-park".into()).spawn(move || report(run(job, item))).map(|_| ())
+pub fn spawn(job: Job, report: impl FnOnce(Option<Done>) + Send + 'static) -> io::Result<()> {
+    std::thread::Builder::new().name("tasca-park".into()).spawn(move || report(run(job))).map(|_| ())
 }
 
 static DONE: Mutex<Vec<Done>> = Mutex::new(Vec::new());
@@ -205,52 +215,64 @@ impl Drop for Mta {
     }
 }
 
-fn run(job: Job, item: Option<ItemId>) -> Option<Done> {
+/// The drop's data object, on the worker.
+fn arrive(c: Carried) -> Option<IDataObject> {
+    c.take().inspect_err(|e| log(format!("the drop did not reach the worker: {e}"))).ok()
+}
+
+/// The first component of `p` under `dir`.
+fn top<'a>(dir: &Path, p: &'a Path) -> Option<Component<'a>> {
+    p.strip_prefix(dir).ok()?.components().next()
+}
+
+fn run(job: Job) -> Option<Done> {
     let _mta = Mta::enter();
     match job {
-        Job::Write { dir, files, entries, source } => {
-            let obj: Option<IDataObject> =
-                source.and_then(|c| c.take().inspect_err(|e| log(format!("the drop did not reach the worker: {e}"))).ok());
-            let written: Vec<PathBuf> = entries
-                .into_iter()
-                .filter_map(|e| match write(&e.path, e.what, obj.as_ref()) {
-                    Ok(()) => Some(e.path),
+        Job::Write(item, Writes { dir, files, entries, source }) => {
+            let obj = source.and_then(arrive);
+            let mut buf = Vec::new();
+            let mut written = HashSet::new();
+            for e in entries {
+                match write(&e.path, e.what, obj.as_ref(), &mut buf) {
+                    Ok(()) => {
+                        written.extend(top(&dir, &e.path).map(|c| c.as_os_str().to_owned()));
+                    }
                     Err(err) => {
                         log(format!("writing {} failed: {err}", e.path.display()));
                         if e.path.is_file() {
                             let _ = std::fs::remove_file(&e.path);
                         }
-                        None
                     }
-                })
-                .collect();
-            let files: Vec<PathBuf> = files.into_iter().filter(|f| written.iter().any(|w| w.starts_with(f))).collect();
+                }
+            }
+            let files: Vec<PathBuf> =
+                files.into_iter().filter(|f| top(&dir, f).is_some_and(|c| written.contains(c.as_os_str()))).collect();
             if files.is_empty() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             if let Some(o) = &obj {
-                end_object(o, !files.is_empty());
+                end(o, !files.is_empty());
             }
             Some(Done::Filled(item, files))
         }
         Job::Hdrop(c) => {
-            let obj: IDataObject = c.take().inspect_err(|e| log(format!("the drop did not reach the worker: {e}"))).ok()?;
-            let p = hdrop::park(&obj);
-            end_object(&obj, p.is_some());
+            let obj = arrive(c)?;
+            let p = hdrop::read_and_keep(&obj);
+            end(&obj, p.is_some());
             p.map(Done::Parked)
         }
     }
 }
 
-fn write(path: &Path, what: What, obj: Option<&IDataObject>) -> io::Result<()> {
+fn write(path: &Path, what: What, obj: Option<&IDataObject>, buf: &mut Vec<u8>) -> io::Result<()> {
     match what {
         What::Dir => std::fs::create_dir_all(path),
         What::Bytes(b) => new_file(path)?.write_all(&b),
-        What::Stream(c) => copy_stream(&c.take().map_err(io::Error::other)?, path),
+        What::Stream(c) => copy_stream(&c.take().map_err(io::Error::other)?, path, buf),
         What::Storage(c) => save_storage(&c.take().map_err(io::Error::other)?, path),
         What::Contents(lindex, size) => {
             let obj = obj.ok_or_else(|| io::Error::other("no data object"))?;
-            write_medium(file_contents(obj, lindex)?, path, size)
+            Medium(file_contents(obj, lindex)?).write(path, size, buf)
         }
         What::Written => Ok(()),
     }
@@ -258,41 +280,32 @@ fn write(path: &Path, what: What, obj: Option<&IDataObject>) -> io::Result<()> {
 
 /// `FileContents[lindex]`, as a stream, an `HGLOBAL` or a storage.
 pub fn file_contents(obj: &IDataObject, lindex: i32) -> io::Result<STGMEDIUM> {
-    let f = FORMATETC {
-        cfFormat: formats::registered(CFSTR_FILECONTENTS),
-        ptd: std::ptr::null_mut(),
-        dwAspect: DVASPECT_CONTENT.0,
-        lindex,
-        tymed: (TYMED_ISTREAM.0 | TYMED_HGLOBAL.0 | TYMED_ISTORAGE.0) as u32,
-    };
+    let tymed = (TYMED_ISTREAM.0 | TYMED_HGLOBAL.0 | TYMED_ISTORAGE.0) as u32;
+    let f = formats::format(formats::registered(CFSTR_FILECONTENTS), lindex, tymed);
     unsafe { obj.GetData(&f) }.map_err(io::Error::other)
 }
 
-fn write_medium(m: STGMEDIUM, path: &Path, size: Option<u64>) -> io::Result<()> {
-    let m = Medium(m);
-    match m.0.tymed {
-        t if t == TYMED_HGLOBAL.0 as u32 => new_file(path)?.write_all(&formats::global_bytes(unsafe { m.0.u.hGlobal }, size)),
-        t if t == TYMED_ISTREAM.0 as u32 => copy_stream(m.stream()?, path),
-        t if t == TYMED_ISTORAGE.0 as u32 => save_storage(m.storage()?, path),
-        t => Err(io::Error::other(format!("unexpected medium (tymed {t})"))),
+/// The folder for a new file.
+fn parent_dirs(path: &Path) -> io::Result<()> {
+    match path.parent() {
+        Some(p) => std::fs::create_dir_all(p),
+        None => Ok(()),
     }
 }
 
 /// A new file (never an existing one), its folders created as needed.
 fn new_file(path: &Path) -> io::Result<std::fs::File> {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-    }
+    parent_dirs(path)?;
     OpenOptions::new().write(true).create_new(true).open(path)
 }
 
-/// Copy a stream from its start to a new file, in `CHUNK`s. The size is not
-/// trusted: read until the stream ends.
-fn copy_stream(s: &IStream, path: &Path) -> io::Result<()> {
+/// Copy a stream from its start to a new file, in `CHUNK`s through `buf`
+/// (one buffer per job). The size is not trusted: read until the stream ends.
+fn copy_stream(s: &IStream, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
     // A source may hand the stream over at its end; not every stream seeks.
     let _ = unsafe { s.Seek(0, STREAM_SEEK_SET, None) };
     let mut f = new_file(path)?;
-    let mut buf = vec![0u8; CHUNK];
+    buf.resize(CHUNK, 0);
     loop {
         let mut n = 0u32;
         unsafe { s.Read(buf.as_mut_ptr() as _, CHUNK as u32, Some(&mut n)) }.ok().map_err(io::Error::other)?;
@@ -305,9 +318,7 @@ fn copy_stream(s: &IStream, path: &Path) -> io::Result<()> {
 
 /// Save a storage as a new compound file (Outlook's `.msg`).
 fn save_storage(src: &IStorage, path: &Path) -> io::Result<()> {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-    }
+    parent_dirs(path)?;
     unsafe {
         let mut raw = std::ptr::null_mut();
         let mode = STGM(STGM_READWRITE.0 | STGM_SHARE_EXCLUSIVE.0); // fails if the file exists
@@ -319,47 +330,29 @@ fn save_storage(src: &IStorage, path: &Path) -> io::Result<()> {
     }
 }
 
-/// How a drop's async operation (`IDataObjectAsyncCapability`) went.
-pub enum Async {
-    /// The source has none: read in `Drop`.
-    No,
-    /// Started; the data object is carried to a worker, which ends it.
-    Carried(Carried),
-    /// Started, but the data object could not be marshalled: read in `Drop`,
-    /// then `end`.
-    Here(IDataObjectAsyncCapability),
-}
-
-/// Start an async operation if the source is in async mode.
-pub fn start_async(obj: &IDataObject) -> Async {
-    let Ok(cap) = obj.cast::<IDataObjectAsyncCapability>() else { return Async::No };
+/// If the source is in async mode: marshal the data object for a worker,
+/// then `StartOperation` (the worker ends it). `None`: read in `Drop`, which
+/// is also the fallback when the object can't be marshalled.
+pub fn start_async(obj: &IDataObject) -> Option<Carried> {
+    let cap = obj.cast::<IDataObjectAsyncCapability>().ok()?;
     if !unsafe { cap.GetAsyncMode() }.is_ok_and(|m| m.as_bool()) {
-        return Async::No;
+        return None;
     }
-    if let Err(e) = unsafe { cap.StartOperation(None::<&IBindCtx>) } {
-        log(format!("StartOperation failed, reading in Drop: {e}"));
-        return Async::No;
-    }
-    match Carried::new(obj) {
-        Ok(c) => Async::Carried(c),
+    let c = Carried::new(obj).inspect_err(|e| log(format!("the drop can't be marshalled, reading in Drop: {e}"))).ok()?;
+    match unsafe { cap.StartOperation(None::<&IBindCtx>) } {
+        Ok(()) => Some(c),
         Err(e) => {
-            log(format!("the drop could not be marshalled, reading in Drop: {e}"));
-            Async::Here(cap)
+            log(format!("StartOperation failed, reading in Drop: {e}"));
+            None
         }
     }
 }
 
 /// End the source's async operation: `COPY` if anything was Parked.
-pub fn end(cap: &IDataObjectAsyncCapability, ok: bool) {
+fn end(obj: &IDataObject, ok: bool) {
     let (hr, effect) = if ok { (S_OK, DROPEFFECT_COPY) } else { (E_FAIL, DROPEFFECT_NONE) };
-    if let Err(e) = unsafe { cap.EndOperation(hr, None::<&IBindCtx>, effect.0) } {
+    let r = obj.cast::<IDataObjectAsyncCapability>().and_then(|cap| unsafe { cap.EndOperation(hr, None::<&IBindCtx>, effect.0) });
+    if let Err(e) = r {
         log(format!("EndOperation failed: {e}"));
-    }
-}
-
-fn end_object(obj: &IDataObject, ok: bool) {
-    match obj.cast::<IDataObjectAsyncCapability>() {
-        Ok(cap) => end(&cap, ok),
-        Err(e) => log(format!("no async capability to end: {e}")),
     }
 }
