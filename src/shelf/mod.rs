@@ -375,7 +375,6 @@ fn tick() {
 
 /// Add an Item on top (a Park). Scrolls to the top so it is seen, re-renders,
 /// and probes its files off the UI thread. `files` must not be empty.
-#[allow(dead_code)] // TASCA-14, TASCA-16
 pub fn add_top(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
     let (hwnd, id, jobs) = with(|s| {
         let id = s.model.add_top(files, kind);
@@ -388,7 +387,6 @@ pub fn add_top(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
 }
 
 /// Move an existing Item to the top (duplicate Park, spec §4).
-#[allow(dead_code)] // TASCA-14
 pub fn move_to_top(id: ItemId) -> bool {
     with(|s| {
         let moved = s.model.move_to_top(id);
@@ -422,7 +420,6 @@ pub fn hide_if_empty() {
 }
 
 /// A drag is over the Shelf: draw the blue outline (TASCA-14's drop target).
-#[allow(dead_code)] // TASCA-14
 pub fn set_hot(hot: bool) {
     with(|s| {
         if s.hot != hot {
@@ -439,19 +436,17 @@ pub fn set_in_own_drag(on: bool) {
     with(|s| s.in_own_drag = on);
 }
 
-#[allow(dead_code)] // TASCA-14
 pub fn in_own_drag() -> bool {
     with(|s| s.in_own_drag).unwrap_or(false)
 }
 
 /// Read access to the Item list (duplicate check, building a data object).
-#[allow(dead_code)] // TASCA-14, TASCA-15, TASCA-17
 pub fn with_model<R>(f: impl FnOnce(&Model) -> R) -> Option<R> {
     with(|s| f(&s.model))
 }
 
 /// Shown and not fading out.
-#[allow(dead_code)] // TASCA-14, TASCA-15
+#[allow(dead_code)] // TASCA-15
 pub fn is_shown() -> bool {
     with(|s| s.showing()).unwrap_or(false)
 }

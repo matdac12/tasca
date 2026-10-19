@@ -119,8 +119,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
         }
         self.reset();
         let own = shelf::in_own_drag();
+        // Read (and copy) only if the source accepts the effect we will answer.
         let parked = match obj.as_ref() {
-            Some(o) if !own => read(o),
+            Some(o) if rules::choose_effect(allowed, true, own) != DROPEFFECT_NONE => read(o),
             _ => None,
         };
         let e = rules::choose_effect(allowed, parked.is_some(), own);

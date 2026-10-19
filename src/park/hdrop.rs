@@ -84,6 +84,9 @@ fn keep_or_copy(paths: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
             }
         })
         .collect();
+    if let (Some(d), 0) = (dir, copied) {
+        let _ = std::fs::remove_dir(d); // every copy failed: leave no empty folder
+    }
     (files, copied)
 }
 

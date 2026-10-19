@@ -131,6 +131,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        park::revoke(hwnd); // no-op after WM_DESTROY; covers a failed GetMessageW
         park::uninit();
         log("resident exit");
         let _ = CloseHandle(mutex);
