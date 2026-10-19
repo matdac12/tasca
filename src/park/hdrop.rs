@@ -2,10 +2,12 @@
 //! copied into a drop folder first, because their source deletes them right
 //! after the drop (7-Zip's `%TEMP%\7zE…`, Chromium's `chrome_drag…`).
 //!
-//! Everything here runs inside `Drop`, on the UI thread: the copy must finish
-//! before `Drop` returns, since the source deletes its temp files the moment
-//! `DoDragDrop` returns. `CF_HDROP` is read in `Drop` only, never cached from
-//! `DragEnter` (7-Zip offers a placeholder "Pre" list until the button is up).
+//! For rule 1 everything here runs inside `Drop`, on the UI thread: the copy
+//! must finish before `Drop` returns, since the source deletes its temp files
+//! the moment `DoDragDrop` returns. `CF_HDROP` is read in `Drop` only, never
+//! cached from `DragEnter` (7-Zip offers a placeholder "Pre" list until the
+//! button is up). Rule 2 (`async_hdrop`) runs the same `park` on a worker,
+//! inside the source's async operation.
 
 use std::io;
 use std::path::{Path, PathBuf};

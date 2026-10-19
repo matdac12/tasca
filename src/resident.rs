@@ -14,7 +14,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
-use crate::proto::{CLASS, MUTEX, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
+use crate::proto::{CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
 use crate::{park, shelf};
 
 /// Caps+D while resident.
@@ -41,6 +41,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_SHOW => {
                 on_show(hwnd);
+                LRESULT(0)
+            }
+            WM_PARK_DONE => {
+                park::on_done();
                 LRESULT(0)
             }
             WM_QUIT_RESIDENT => {
@@ -114,6 +118,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         shelf::create(hwnd)?;
         // Then OLE: the Shelf is a drop target from now on, shown or not.
         park::register(hwnd);
+        park::sweep_old_drops();
 
         let pmv2 = AreDpiAwarenessContextsEqual(
             GetThreadDpiAwarenessContext(),

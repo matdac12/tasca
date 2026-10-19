@@ -8,7 +8,7 @@
 //! `WM_WINDOWPOS*`, which go to `DefWindowProcW`.
 //!
 //! Hooks for later slices (no-ops or plain setters until they land):
-//! `add_top`, `move_to_top`, `remove`, `hide_if_empty`, `set_hot`,
+//! `add_top`, `add_pending` / `filled`, `move_to_top`, `remove`, `hide_if_empty`, `set_hot`,
 //! `set_in_own_drag` / `in_own_drag`, `with_model`, `is_shown`, and
 //! `takeout::start`.
 
@@ -186,11 +186,12 @@ impl Shelf {
         self.tracking_leave = false;
     }
 
+    /// Items whose files need probing (pending Items' files aren't written yet).
     fn file_jobs(&self, only: Option<&[ItemId]>) -> Vec<(ItemId, Vec<PathBuf>)> {
         self.model
             .items()
             .iter()
-            .filter(|i| only.is_none_or(|ids| ids.contains(&i.id)))
+            .filter(|i| !i.pending && only.is_none_or(|ids| ids.contains(&i.id)))
             .map(|i| (i.id, i.files.clone()))
             .collect()
     }
@@ -384,6 +385,37 @@ pub fn add_top(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
     })?;
     files_need_work(hwnd, jobs, false);
     Some(id)
+}
+
+/// Add an Item whose files are still being written (TASCA-16): shown at once
+/// as "Saving…", not probed until `filled`.
+pub fn add_pending(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
+    with(|s| {
+        let id = s.model.add_pending(files, kind);
+        s.scroll = 0.0;
+        s.refresh();
+        id
+    })
+}
+
+/// A pending Item's files are written: keep these, probe them and load the
+/// thumbnail. None written: the Item goes.
+pub fn filled(id: ItemId, files: Vec<PathBuf>) {
+    if files.is_empty() {
+        remove(&[id]);
+        return;
+    }
+    let jobs = with(|s| {
+        if !s.model.fill(id, files) {
+            return None;
+        }
+        s.refresh();
+        Some((s.hwnd, s.file_jobs(Some(&[id]))))
+    })
+    .flatten();
+    if let Some((hwnd, jobs)) = jobs {
+        files_need_work(hwnd, jobs, false);
+    }
 }
 
 /// Move an existing Item to the top (duplicate Park, spec §4).

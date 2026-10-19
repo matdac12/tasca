@@ -2,8 +2,8 @@
 //! (spec §4). Ids are monotonic and unique, also across resident restarts, so
 //! folders sort by age and a new Park never lands in an old folder.
 //!
-//! TASCA-16 reuses `create` for Materialized files and adds name sanitising,
-//! case-insensitive de-duplication and the startup sweep of old folders.
+//! Names inside them: `names` (planned, for Materialized files) and
+//! `free_name` (on disk, for rule 1's copies). Old folders: `sweep`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -94,11 +94,9 @@ pub fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
     if !first.exists() {
         return first;
     }
-    let p = Path::new(name);
-    let stem = p.file_stem().unwrap_or(name).to_string_lossy();
-    let ext = p.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let name = name.to_string_lossy();
     (2..)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .map(|n| dir.join(super::names::numbered(&name, n)))
         .find(|c| !c.exists())
         .expect("an unused name")
 }

@@ -18,8 +18,7 @@ pub const WM_QUIT_RESIDENT: u32 = WM_APP + 3;
 pub const WM_PROBED: u32 = WM_APP + 4;
 /// TASCA-17: a row thumbnail landed in `thumbs`' cache. No pointer in the message.
 pub const WM_THUMB_READY: u32 = WM_APP + 16;
-/// Reserved for TASCA-16: a Park / Materialize finished on its worker. No handler yet.
-#[allow(dead_code)]
+/// TASCA-16: a Park worker finished (files written, async drop read). No pointer in the message.
 pub const WM_PARK_DONE: u32 = WM_APP + 17;
 
 #[cfg(test)]
