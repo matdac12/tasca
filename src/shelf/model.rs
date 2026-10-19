@@ -2,15 +2,12 @@
 //! facts arrive from `probe`, on a worker thread).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Stable for the life of the resident, never reused, so background threads
 /// can post results by id after the list has changed.
 pub type ItemId = u64;
 
-// Built by the Park (TASCA-14) and Materialize (TASCA-16) slices; until then
-// only the debug `--seed` makes References.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A real file or folder, kept by path.
@@ -92,6 +89,17 @@ impl Item {
     }
 }
 
+/// A path as compared for equality: lower case (NTFS is case-insensitive),
+/// `\` separators, no `\\?\` prefix, no trailing separator.
+pub fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
+    let s = match s.strip_prefix(r"\\?\unc\") {
+        Some(unc) => format!(r"\\{unc}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned(),
+    };
+    s.trim_end_matches('\\').to_owned()
+}
+
 pub fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
@@ -163,6 +171,19 @@ impl Model {
         let item = self.items.remove(i);
         self.items.insert(0, item);
         true
+    }
+
+    /// The duplicate-Park rule (spec §4): the Item whose files are exactly
+    /// this path set (any order, case-insensitive), if one is on the Shelf.
+    pub fn same_files(&self, files: &[PathBuf]) -> Option<ItemId> {
+        fn key(files: &[PathBuf]) -> BTreeSet<String> {
+            files.iter().map(|f| path_key(f)).collect()
+        }
+        let want = key(files);
+        if want.is_empty() {
+            return None;
+        }
+        self.items.iter().find(|i| key(&i.files) == want).map(|i| i.id)
     }
 
     /// Remove these Items (unknown ids are ignored). Returns how many went.
@@ -316,6 +337,28 @@ mod tests {
         assert_eq!(m.remove(&[ids[0], ids[3], 999]), 2);
         assert_eq!(m.len(), 3);
         assert_eq!(m.get(ids[0]), None);
+    }
+
+    #[test]
+    fn same_files_finds_the_item_with_exactly_that_path_set() {
+        let mut m = Model::new();
+        let single = m.add_top(vec![r"C:\x\a.txt".into()], Kind::Reference);
+        let stack = m.add_top(vec![r"C:\x\1.jpg".into(), r"C:\x\2.jpg".into(), r"C:\x\3.jpg".into()], Kind::Reference);
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt"])), Some(single));
+        // Order and case don't matter (NTFS paths are case-insensitive).
+        assert_eq!(m.same_files(&p(&[r"c:\X\3.JPG", r"C:\x\1.jpg", r"C:\x\2.jpg"])), Some(stack));
+        // A subset, a superset or another file is a new Park.
+        assert_eq!(m.same_files(&p(&[r"C:\x\1.jpg", r"C:\x\2.jpg"])), None);
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\b.txt"])), None);
+        assert_eq!(m.same_files(&p(&[r"C:\x\b.txt"])), None);
+        assert_eq!(m.same_files(&[]), None);
+        // Spellings of the same path match too.
+        assert_eq!(m.same_files(&p(&[r"\\?\C:\x\a.txt"])), Some(single));
+        assert_eq!(m.same_files(&p(&["C:/x/a.txt"])), Some(single));
+        // A path listed twice in one drop is still the same set.
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\a.txt"])), Some(single));
     }
 
     #[test]

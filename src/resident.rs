@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
 use crate::proto::{CLASS, MUTEX, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
-use crate::shelf;
+use crate::{park, shelf};
 
 /// Caps+D while resident.
 fn on_toggle(_hwnd: HWND) {
@@ -50,6 +50,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_DESTROY => {
+                park::revoke(hwnd);
                 shelf::destroy();
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -111,6 +112,8 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         let off = 1i32;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &off as *const _ as _, 4);
         shelf::create(hwnd)?;
+        // Then OLE: the Shelf is a drop target from now on, shown or not.
+        park::register(hwnd);
 
         let pmv2 = AreDpiAwarenessContextsEqual(
             GetThreadDpiAwarenessContext(),
@@ -128,6 +131,8 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        park::revoke(hwnd); // no-op after WM_DESTROY; covers a failed GetMessageW
+        park::uninit();
         log("resident exit");
         let _ = CloseHandle(mutex);
         Ok(0)

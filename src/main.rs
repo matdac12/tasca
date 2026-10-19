@@ -2,6 +2,7 @@
 
 mod launch;
 mod log;
+mod park;
 mod proto;
 mod resident;
 mod shelf;
