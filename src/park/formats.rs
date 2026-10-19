@@ -50,7 +50,7 @@ pub fn hglobal_bytes(obj: &IDataObject, cf: u16) -> Option<Vec<u8>> {
 
 /// Little-endian UTF-16 up to the first NUL.
 pub fn utf16_z(bytes: &[u8]) -> String {
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
     String::from_utf16_lossy(&units)
 }
 
