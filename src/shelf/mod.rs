@@ -412,7 +412,6 @@ pub fn remove(ids: &[ItemId]) -> usize {
 }
 
 /// Hide if the Shelf is empty (after the last Item is Taken out).
-#[allow(dead_code)] // TASCA-15
 pub fn hide_if_empty() {
     if with(|s| s.model.is_empty()) == Some(true) {
         hide();
@@ -431,7 +430,6 @@ pub fn set_hot(hot: bool) {
 
 /// The Shelf's own Take out is running (TASCA-15 sets it; TASCA-14 answers
 /// `DROPEFFECT_NONE` while it is set; toggles are ignored).
-#[allow(dead_code)] // TASCA-15
 pub fn set_in_own_drag(on: bool) {
     with(|s| s.in_own_drag = on);
 }
