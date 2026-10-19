@@ -35,8 +35,6 @@ pub struct Item {
     pub kind: Kind,
     /// `None` until the first probe answers.
     pub facts: Option<Facts>,
-    /// Files still being written (TASCA-16): not probed, no thumbnail yet.
-    pub pending: bool,
 }
 
 const IMAGE_EXTS: &[&str] = &["PNG", "JPG", "JPEG", "GIF", "WEBP", "HEIC", "BMP", "TIF", "TIFF", "AVIF"];
@@ -70,12 +68,8 @@ impl Item {
         if self.is_stack() { format!("{name} +{}", self.files.len() - 1) } else { name }
     }
 
-    /// Row subtitle: "TYPE · size", "Folder", "N items · size", "Missing" or
-    /// "Saving…" (pending).
+    /// Row subtitle: "TYPE · size", "Folder", "N items · size" or "Missing".
     pub fn subtitle(&self) -> String {
-        if self.pending {
-            return "Saving…".into();
-        }
         if self.missing() {
             return "Missing".into();
         }
@@ -135,6 +129,9 @@ pub struct Model {
     selected: BTreeSet<ItemId>,
     /// Where a Shift-click range starts.
     anchor: Option<ItemId>,
+    /// Items whose files are still being written (TASCA-16): not probed and
+    /// without a thumbnail until `fill`.
+    pending: BTreeSet<ItemId>,
 }
 
 impl Model {
@@ -167,24 +164,28 @@ impl Model {
         debug_assert!(!files.is_empty());
         self.last_id += 1;
         let id = self.last_id;
-        self.items.insert(0, Item { id, files, kind, facts: None, pending: false });
+        self.items.insert(0, Item { id, files, kind, facts: None });
         id
     }
 
     /// `add_top` for an Item whose files are still being written.
     pub fn add_pending(&mut self, files: Vec<PathBuf>, kind: Kind) -> ItemId {
         let id = self.add_top(files, kind);
-        self.items[0].pending = true;
+        self.pending.insert(id);
         id
+    }
+
+    pub fn is_pending(&self, id: ItemId) -> bool {
+        self.pending.contains(&id)
     }
 
     /// A pending Item's files are written: keep these (not empty). False if
     /// the Item is gone.
     pub fn fill(&mut self, id: ItemId, files: Vec<PathBuf>) -> bool {
         debug_assert!(!files.is_empty());
+        self.pending.remove(&id);
         let Some(i) = self.items.iter_mut().find(|i| i.id == id) else { return false };
         i.files = files;
-        i.pending = false;
         true
     }
 
@@ -215,6 +216,7 @@ impl Model {
         self.items.retain(|i| !ids.contains(&i.id));
         for id in ids {
             self.selected.remove(id);
+            self.pending.remove(id);
         }
         if self.anchor.is_some_and(|a| ids.contains(&a)) {
             self.anchor = None;
@@ -223,6 +225,7 @@ impl Model {
     }
 
     pub fn clear(&mut self) {
+        self.pending.clear();
         self.items.clear();
         self.selected.clear();
         self.anchor = None;
@@ -313,7 +316,7 @@ mod tests {
     const CTRL_SHIFT: Mods = Mods { ctrl: true, shift: true };
 
     fn item(files: &[&str], facts: Option<Facts>) -> Item {
-        Item { id: 1, files: files.iter().map(PathBuf::from).collect(), kind: Kind::Reference, facts, pending: false }
+        Item { id: 1, files: files.iter().map(PathBuf::from).collect(), kind: Kind::Reference, facts }
     }
 
     fn file(bytes: u64) -> Option<Facts> {
@@ -336,23 +339,23 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_item_says_saving_until_its_files_are_filled_in() {
+    fn a_pending_item_is_pending_until_its_files_are_filled_in() {
         let mut m = Model::new();
         let id = m.add_pending(vec!["a.png".into(), "b.png".into()], Kind::Materialized);
-        let it = m.get(id).unwrap();
-        assert!(it.pending && it.is_stack());
-        assert_eq!(it.subtitle(), "Saving…");
+        assert!(m.is_pending(id) && m.get(id).unwrap().is_stack());
         assert_eq!(m.items()[0].id, id);
 
         assert!(m.fill(id, vec!["b.png".into()]));
-        let it = m.get(id).unwrap();
-        assert!(!it.pending);
-        assert_eq!(it.files, vec![PathBuf::from("b.png")]);
-        assert_eq!(it.subtitle(), "PNG");
+        assert!(!m.is_pending(id));
+        assert_eq!(m.get(id).unwrap().files, vec![PathBuf::from("b.png")]);
         assert!(!m.fill(id + 1, vec!["x".into()]), "unknown id");
 
         let plain = m.add_top(vec!["c.txt".into()], Kind::Reference);
-        assert!(!m.get(plain).unwrap().pending);
+        assert!(!m.is_pending(plain));
+        // Removed while pending: forgotten.
+        let gone = m.add_pending(vec!["d.txt".into()], Kind::Materialized);
+        m.remove(&[gone]);
+        assert!(!m.is_pending(gone));
     }
 
     #[test]

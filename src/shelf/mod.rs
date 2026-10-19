@@ -191,7 +191,7 @@ impl Shelf {
         self.model
             .items()
             .iter()
-            .filter(|i| !i.pending && only.is_none_or(|ids| ids.contains(&i.id)))
+            .filter(|i| !self.model.is_pending(i.id) && only.is_none_or(|ids| ids.contains(&i.id)))
             .map(|i| (i.id, i.files.clone()))
             .collect()
     }
@@ -380,8 +380,8 @@ pub fn add_top(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
     add(files, kind, false)
 }
 
-/// Add an Item whose files are still being written (TASCA-16): shown at once
-/// as "Saving…", not probed until `filled`.
+/// Add an Item whose files are still being written (TASCA-16): shown at once,
+/// not probed until `filled`.
 pub fn add_pending(files: Vec<PathBuf>, kind: Kind) -> Option<ItemId> {
     add(files, kind, true)
 }
