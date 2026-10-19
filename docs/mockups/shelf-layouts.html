@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- Tasca shelf mockups (2026-10-19). Mattia picked C, the compact list, WITHOUT
+     the "Drop to keep" zone: while a drag hovers, the only cue is the panel's
+     blue outline. An empty shelf shows just the header strip. A and B were not
+     picked. Look follows Parla's overlay (src/overlay.css): dark glass, hairline,
+     Segoe UI. -->
+<html><head><meta charset="utf-8"><title>Tasca shelf mockups</title><style>
+:root{--glass:rgba(18,18,20,.92);--hair:0 0 0 .5px rgba(255,255,255,.14);--t1:rgba(255,255,255,.88);--t2:rgba(255,255,255,.56);--acc:#4cc2ff;--f:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+body{font-family:var(--f);color:#ececf1;background:#131316;margin:0;padding:24px;max-width:760px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.col h3{margin:0 0 2px;font-size:14px;font-weight:600}
+.col p{margin:0 0 10px;font-size:12px;color:#a4a4b0;line-height:1.45;min-height:52px}
+.desk{position:relative;height:330px;border-radius:10px;overflow:hidden;margin-bottom:10px;
+ background:radial-gradient(120% 90% at 80% 10%,#3a4a63 0%,#1d2533 55%,#141821 100%)}
+.desk .win{position:absolute;left:46%;top:34px;right:-20px;bottom:40px;border-radius:8px;background:#f3f3f5;opacity:.93;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+.desk .win::before{content:"";position:absolute;inset:0 0 auto 0;height:22px;border-bottom:1px solid #e3e3e8}
+.desk .win i{position:absolute;left:12px;right:20px;height:6px;border-radius:3px;background:#dcdce2}
+.lbl{position:absolute;right:8px;bottom:6px;font-size:10.5px;color:rgba(255,255,255,.55)}
+.sh{position:absolute;top:50%;transform:translateY(-50%);background:var(--glass);box-shadow:var(--hair),0 6px 18px rgba(0,0,0,.35);color:var(--t1)}
+.th{position:relative;display:grid;place-items:center;border-radius:7px;flex:none}
+.img{background:linear-gradient(135deg,#ff9f43,#c2416b 60%,#4b3a8f)}
+.img2{background:linear-gradient(160deg,#7ee2a8,#2b7a78)}
+.pdf{background:#2a2a30}.pdf::after{content:"PDF";font:700 9px var(--f);color:#ff6b76}
+.dir{background:#2a2a30}
+.txt{background:#2a2a30}.txt::after{content:"TXT";font:700 9px var(--f);color:var(--t2)}
+.badge{position:absolute;right:-5px;top:-5px;min-width:17px;height:17px;padding:0 4px;box-sizing:border-box;border-radius:9px;background:#fff;color:#121214;font:700 10px/17px var(--f);text-align:center}
+.stack{box-shadow:3px -3px 0 -1px #3a3a42,6px -6px 0 -2px #2c2c33}
+.folder{width:55%;height:42%;border-radius:3px;background:#e0b04a;position:relative}
+.folder::before{content:"";position:absolute;left:0;top:-4px;width:45%;height:5px;border-radius:2px 2px 0 0;background:#e0b04a}
+.ghost{position:absolute;width:40px;height:40px;border-radius:7px;opacity:.6;box-shadow:0 6px 16px rgba(0,0,0,.45)}
+.cursor{position:absolute;width:0;height:0;border-left:7px solid #fff;border-top:5px solid transparent;border-bottom:5px solid transparent;transform:rotate(-125deg);filter:drop-shadow(0 1px 1px #000)}
+.drop{border:1.5px dashed rgba(76,194,255,.7);background:rgba(76,194,255,.08);color:var(--acc);display:grid;place-items:center;text-align:center;font-size:11px;line-height:1.3;box-sizing:border-box}
+.hot{box-shadow:0 0 0 1.5px var(--acc),0 6px 18px rgba(0,0,0,.35)!important}
+.name{font-size:10.5px;line-height:13px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.A{left:8px;width:60px;padding:8px 0;border-radius:30px;display:flex;flex-direction:column;align-items:center;gap:8px}
+.A .th{width:44px;height:44px}
+.A .drop{width:44px;height:44px;border-radius:22px;font-size:18px}
+.tip{position:absolute;left:74px;padding:4px 9px;border-radius:7px;background:var(--glass);box-shadow:var(--hair);font-size:11px;color:var(--t1);white-space:nowrap}
+.B{left:0;width:96px;padding:10px 8px;border-radius:0 14px 14px 0;display:flex;flex-direction:column;gap:9px;box-sizing:border-box}
+.B .it{display:flex;flex-direction:column;align-items:center;gap:4px;width:100%}
+.B .th{width:52px;height:52px}
+.B .name{max-width:80px;text-align:center}
+.B .drop{height:64px;border-radius:9px}
+.B .foot{display:flex;justify-content:center;border-top:.5px solid rgba(255,255,255,.1);padding-top:7px;font-size:10.5px;color:var(--t2)}
+.C{left:8px;width:200px;padding:8px;border-radius:12px;box-sizing:border-box}
+.C .hd{display:flex;align-items:center;justify-content:space-between;padding:1px 4px 7px;font-size:11px;color:var(--t2)}
+.C.empty .hd{padding:1px 4px}
+.C .row{display:flex;align-items:center;gap:9px;padding:5px 4px;border-radius:7px}
+.C .row.sel{background:rgba(255,255,255,.08)}
+.C .th{width:30px;height:30px;border-radius:6px}
+.C .th.pdf::after,.C .th.txt::after{font-size:7.5px}
+.C .meta{min-width:0;flex:1}
+.C .nm{font-size:12px;line-height:15px;color:var(--t1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.C .sub{font-size:10.5px;color:var(--t2)}
+.C .badge{right:-6px;top:-6px;transform:scale(.85)}
+.pick{outline:2px solid var(--acc);outline-offset:6px;border-radius:10px}
+</style></head><body>
+<div class="grid">
+<div class="col"><h3>A · Capsule</h3><p>Not picked. Parla's pill stood on end; thumbnails only, name on hover.</p>
+ <div class="desk"><div class="win"><i style="top:40px"></i><i style="top:56px;right:60px"></i><i style="top:72px;right:90px"></i></div>
+  <div class="sh A hot"><div class="th img"></div><div class="th pdf"></div><div class="drop">+</div></div>
+  <div class="cursor" style="left:36px;top:212px"></div><div class="ghost img2" style="left:44px;top:222px"></div>
+  <span class="lbl">mid-drag, after Caps+D</span></div>
+ <div class="desk"><div class="win"><i style="top:40px"></i><i style="top:56px;right:60px"></i></div>
+  <div class="sh A"><div class="th img"></div><div class="th pdf"></div><div class="th dir"><div class="folder"></div></div><div class="th img2 stack"><span class="badge">5</span></div><div class="th txt"></div></div>
+  <div class="tip" style="top:116px">Offerta_Rachello.pdf</div>
+  <span class="lbl">holding 5 items · hover</span></div>
+</div>
+<div class="col"><h3>B · Edge tab</h3><p>Not picked. Flush with the edge, thumbnail plus short name, like Yoink.</p>
+ <div class="desk"><div class="win"><i style="top:40px"></i><i style="top:56px;right:60px"></i><i style="top:72px;right:90px"></i></div>
+  <div class="sh B hot"><div class="it"><div class="th img"></div><span class="name">snap-0919.png</span></div><div class="drop">Drop to<br>keep</div></div>
+  <div class="cursor" style="left:66px;top:206px"></div><div class="ghost img2" style="left:74px;top:216px"></div>
+  <span class="lbl">mid-drag, after Caps+D</span></div>
+ <div class="desk"><div class="win"><i style="top:40px"></i><i style="top:56px;right:60px"></i></div>
+  <div class="sh B">
+   <div class="it"><div class="th img"></div><span class="name">snap-0919.png</span></div>
+   <div class="it"><div class="th pdf"></div><span class="name">Offerta_Rachello.pdf</span></div>
+   <div class="it"><div class="th img2 stack"><span class="badge">5</span></div><span class="name">IMG_2041 +4</span></div>
+   <div class="foot">Clear all</div></div>
+  <span class="lbl">holding 3 items</span></div>
+</div>
+<div class="col pick"><h3>C · List (picked)</h3><p>Compact list: icon, name, type and size. No drop zone: a drag hovering shows only the blue outline. Empty = header strip.</p>
+ <div class="desk"><div class="win" style="left:62%"><i style="top:40px"></i><i style="top:56px;right:40px"></i></div>
+  <div class="sh C hot"><div class="hd"><span>Tasca · 1</span><span>Clear all</span></div>
+   <div class="row"><div class="th img"></div><div class="meta"><div class="nm">snap-0919.png</div><div class="sub">PNG · 214 KB</div></div></div></div>
+  <div class="cursor" style="left:150px;top:166px"></div><div class="ghost img2" style="left:158px;top:176px"></div>
+  <span class="lbl">mid-drag, after Caps+D</span></div>
+ <div class="desk"><div class="win" style="left:62%"><i style="top:40px"></i><i style="top:56px;right:40px"></i></div>
+  <div class="sh C"><div class="hd"><span>Tasca · 4</span><span>Clear all</span></div>
+   <div class="row"><div class="th img"></div><div class="meta"><div class="nm">snap-0919.png</div><div class="sub">PNG · 214 KB</div></div></div>
+   <div class="row sel"><div class="th pdf"></div><div class="meta"><div class="nm">Offerta_Rachello.pdf</div><div class="sub">PDF · 1.2 MB</div></div></div>
+   <div class="row"><div class="th dir"><div class="folder"></div></div><div class="meta"><div class="nm">clips</div><div class="sub">Folder</div></div></div>
+   <div class="row"><div class="th img2"><span class="badge">5</span></div><div class="meta"><div class="nm">IMG_2041.jpg +4</div><div class="sub">5 images · 18 MB</div></div></div></div>
+  <span class="lbl">holding 4 items</span></div>
+</div>
+</div>
+</body></html>
