@@ -9,6 +9,8 @@ Rules for anyone (human or agent) changing this repo.
   `windows-core = "=0.62.2"` are exact pins: never bump them. Enable only the
   `windows` features the code uses. No new heavy dependency without a reason
   stated in the PR.
+- **Toolchain:** `rust-toolchain.toml` pins Rust 1.95.0 so CI and local use the
+  same compiler and lints; bump it only deliberately, fixing new lints in the same PR.
 - **Never block the UI thread.** Cross-process drag-and-drop calls arrive on it.
   Slow work (file I/O, thumbnails, async data objects) goes to a worker thread.
 - **Frozen interface** (`src/proto.rs`): window class `Tasca.Shelf`,
