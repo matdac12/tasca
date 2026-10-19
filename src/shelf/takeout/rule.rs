@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_NONE};
 
-use crate::shelf::model::{path_key, Item, Kind};
+use crate::shelf::model::{path_key, Item, ItemId, Kind};
 
 /// How the drag loop ended, as our `IDropSource` decided it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,8 +38,14 @@ pub fn succeeded(o: &Outcome, reference_gone: impl FnOnce() -> bool) -> bool {
 
 /// The Items to drag, in order, and the ones left out because a file is gone
 /// (a Missing Item can't be Taken out; one missing file makes a Stack missing).
-pub fn split_missing(items: &[Item], exists: impl Fn(&Path) -> bool) -> (Vec<&Item>, Vec<&Item>) {
-    items.iter().partition(|i| i.files.iter().all(|f| exists(f)))
+/// Pending Items (files still being written) are in neither list: their
+/// planned paths don't exist yet, which is not "gone".
+pub fn split_missing(
+    items: &[Item],
+    is_pending: impl Fn(ItemId) -> bool,
+    exists: impl Fn(&Path) -> bool,
+) -> (Vec<&Item>, Vec<&Item>) {
+    items.iter().filter(|i| !is_pending(i.id)).partition(|i| i.files.iter().all(|f| exists(f)))
 }
 
 /// All files share one parent folder, so the shell item array can make the
@@ -69,7 +75,7 @@ pub fn reference_gone(items: &[&Item], gone: impl Fn(&Path) -> bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shelf::model::ItemId;
+    use crate::shelf::model::Model;
     use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
 
     const NONE: DROPEFFECT = DROPEFFECT_NONE;
@@ -141,13 +147,40 @@ mod tests {
         let exists = |p: &Path| !p.to_string_lossy().contains("gone");
 
         let items = [a, gone, stack, m];
-        let (take, missing) = split_missing(&items, exists);
+        let (take, missing) = split_missing(&items, |_| false, exists);
         assert_eq!(ids(&take), [1, 4]);
         assert_eq!(ids(&missing), [2, 3], "one gone file makes the whole Stack missing");
 
-        let (take, missing) = split_missing(&items[1..2], exists);
+        let (take, missing) = split_missing(&items[1..2], |_| false, exists);
         assert!(take.is_empty());
         assert_eq!(ids(&missing), [2]);
+    }
+
+    #[test]
+    fn a_pending_item_is_neither_dragged_nor_missing_until_filled() {
+        let mut m = Model::default();
+        let pending = m.add_pending(vec![r"C:\t\later.png".into()], Kind::Materialized);
+        let plain = m.add_top(vec![r"C:\x\a.txt".into()], Kind::Reference);
+        let exists = |p: &Path| p.to_string_lossy().contains(r"\x\");
+
+        let items = m.items().to_vec();
+        let (take, missing) = split_missing(&items, |id| m.is_pending(id), exists);
+        assert_eq!(ids(&take), [plain]);
+        assert!(missing.is_empty(), "the planned path doesn't exist yet: not Missing");
+
+        // Filled: an ordinary Item, dragged if its files are there...
+        assert!(m.fill(pending, vec![r"C:\x\later.png".into()]));
+        let items = m.items().to_vec();
+        let (take, missing) = split_missing(&items, |id| m.is_pending(id), exists);
+        assert_eq!(ids(&take), [plain, pending]);
+        assert!(missing.is_empty());
+
+        // ...and Missing if they are not.
+        assert!(m.fill(pending, vec![r"C:\t\gone.png".into()]));
+        let items = m.items().to_vec();
+        let (take, missing) = split_missing(&items, |id| m.is_pending(id), exists);
+        assert_eq!(ids(&take), [plain]);
+        assert_eq!(ids(&missing), [pending]);
     }
 
     #[test]
@@ -162,7 +195,7 @@ mod tests {
         let gone = item(2, Kind::Reference, &[dir.join("not-here.txt").to_str().unwrap()]);
 
         let items = [back, gone];
-        let (take, missing) = split_missing(&items, |p| p.exists());
+        let (take, missing) = split_missing(&items, |_| false, |p| p.exists());
         assert_eq!(ids(&take), [1]);
         assert_eq!(ids(&missing), [2]);
         std::fs::remove_dir_all(dir).unwrap();

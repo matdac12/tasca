@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use windows::core::{Result, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{GlobalFree, POINT};
 use windows::Win32::System::Com::{
-    CoTaskMemFree, IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
+    CoTaskMemFree, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
@@ -22,16 +22,13 @@ use windows::Win32::UI::Shell::{
 
 use super::rule;
 use crate::log::log;
+use crate::park::formats::hglobal_format;
 
 /// Which way the data object was built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Via {
     ShellItems,
     HDrop,
-}
-
-fn hglobal_format(cf: u16) -> FORMATETC {
-    FORMATETC { cfFormat: cf, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 }
 }
 
 /// The data object for these files, in order. Needs COM/OLE on the thread.
@@ -118,7 +115,7 @@ pub fn read_dword(obj: &IDataObject, name: PCWSTR) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::S_OK;
+    use crate::park::formats::{offers, registered};
     use windows::Win32::System::Ole::OleInitialize;
     use windows::Win32::UI::Shell::{DragQueryFileW, CFSTR_LOGICALPERFORMEDDROPEFFECT, CFSTR_SHELLIDLIST, HDROP};
 
@@ -145,12 +142,8 @@ mod tests {
         (dir, paths)
     }
 
-    fn offers(obj: &IDataObject, cf: u16) -> bool {
-        unsafe { obj.QueryGetData(&hglobal_format(cf)) == S_OK }
-    }
-
     fn cf(name: PCWSTR) -> u16 {
-        unsafe { RegisterClipboardFormatW(name) as u16 }
+        registered(name)
     }
 
     fn hdrop_paths(obj: &IDataObject) -> Vec<PathBuf> {

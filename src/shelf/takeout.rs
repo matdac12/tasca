@@ -20,7 +20,7 @@ use std::path::Path;
 use windows::core::{implement, ComObject, BOOL, HRESULT};
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, POINT, S_OK};
 use windows::Win32::System::Ole::{
-    IDropSource, IDropSource_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+    IDropSource, IDropSource_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
@@ -29,16 +29,21 @@ use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetCursorPos, WindowF
 
 use super::model::{Facts, ItemId};
 use crate::log::log;
+use crate::park::formats::effect_name;
 use rule::{Ending, Outcome};
 
 pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
-    let Some(candidates) = super::with(|s| ids.iter().filter_map(|&id| s.model.get(id).cloned()).collect::<Vec<_>>())
-    else {
+    let Some((candidates, pending)) = super::with(|s| {
+        let items = ids.iter().filter_map(|&id| s.model.get(id).cloned()).collect::<Vec<_>>();
+        let pending: Vec<ItemId> = items.iter().map(|i| i.id).filter(|&id| s.model.is_pending(id)).collect();
+        (items, pending)
+    }) else {
         return;
     };
     // Re-check on the disk right before the drag (spec §3): a Missing Item
-    // can't be Taken out.
-    let (items, missing) = rule::split_missing(&candidates, exists);
+    // can't be Taken out, and a pending one (files still being written) is
+    // skipped without being marked Missing.
+    let (items, missing) = rule::split_missing(&candidates, |id| pending.contains(&id), exists);
     if !missing.is_empty() {
         log(format!("take out: {:?} missing, not dragged", missing.iter().map(|i| i.id).collect::<Vec<_>>()));
         super::with(|s| {
@@ -110,15 +115,6 @@ fn exists(p: &Path) -> bool {
 /// denied lookup must not make an Item leave.
 fn surely_gone(p: &Path) -> bool {
     std::fs::metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-}
-
-fn effect_name(e: DROPEFFECT) -> String {
-    let names: Vec<_> = [(DROPEFFECT_COPY, "COPY"), (DROPEFFECT_MOVE, "MOVE"), (DROPEFFECT_LINK, "LINK")]
-        .iter()
-        .filter(|(bit, _)| e.0 & bit.0 != 0)
-        .map(|(_, n)| *n)
-        .collect();
-    if names.is_empty() { "NONE".into() } else { names.join("|") }
 }
 
 /// `in_own_drag` for the drag's duration, cleared on every path (panics too):

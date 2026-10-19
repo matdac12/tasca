@@ -105,7 +105,7 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
             let (x, y) = xy(lp);
             let plain = mods(wp) == Mods::default();
             let file = with(|s| match s.layout.hit(x, y, s.scroll) {
-                Hit::Row(i) if plain => s.model.items().get(i).filter(|it| !it.missing()).map(|it| it.files[0].clone()),
+                Hit::Row(i) if plain => s.model.items().get(i).filter(|it| !it.missing() && !s.model.is_pending(it.id)).map(|it| it.files[0].clone()),
                 _ => None,
             })
             .flatten();
