@@ -1,0 +1,131 @@
+//! The Shelf's `IDropTarget` (spec §4). Every method forwards to the shell's
+//! `IDropTargetHelper` first (drag image), with screen points. `DragEnter`
+//! only asks `QueryGetData`; all reading happens in `Drop`, through `READERS`.
+//!
+//! These calls arrive on the UI thread from the OLE drag loop. They use only
+//! the Shelf's non-blocking hooks, never inside `shelf::with`.
+
+use std::cell::Cell;
+
+use windows::core::{implement, Ref, Result};
+use windows::Win32::Foundation::{HWND, POINT, POINTL};
+use windows::Win32::System::Com::IDataObject;
+use windows::Win32::System::Ole::{IDropTarget, IDropTarget_Impl, DROPEFFECT, DROPEFFECT_NONE};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+use windows::Win32::UI::Shell::IDropTargetHelper;
+
+use super::{formats, hdrop, place, rules, Parked};
+use crate::log::log;
+use crate::shelf;
+
+/// One way to turn a data object into a Park.
+pub struct Reader {
+    pub name: &'static str,
+    /// Offered? `QueryGetData` only (called during the drag).
+    pub offered: fn(&IDataObject) -> bool,
+    /// Read it, in `Drop`. `None` = nothing usable; the next reader is tried.
+    pub park: fn(&IDataObject) -> Option<Parked>,
+}
+
+/// The readers, in the spec's order. TASCA-16 appends rules 2–6 here; a format
+/// with no reader is answered `NONE`, so nothing half-parks.
+pub const READERS: &[Reader] = &[Reader { name: "CF_HDROP", offered: hdrop::offered, park: hdrop::park }];
+
+/// Some reader handles what the object offers.
+pub fn supported(obj: &IDataObject) -> bool {
+    READERS.iter().any(|r| (r.offered)(obj))
+}
+
+/// The first reader that is offered and reads successfully makes the Park.
+pub fn read(obj: &IDataObject) -> Option<(&'static str, Parked)> {
+    READERS.iter().filter(|r| (r.offered)(obj)).find_map(|r| (r.park)(obj).map(|p| (r.name, p)))
+}
+
+fn effect_name(e: DROPEFFECT) -> String {
+    let names = [(1, "COPY"), (2, "MOVE"), (4, "LINK")];
+    let v: Vec<_> = names.iter().filter(|(bit, _)| e.0 & bit != 0).map(|(_, n)| *n).collect();
+    if v.is_empty() { "NONE".into() } else { v.join("|") }
+}
+
+#[implement(IDropTarget)]
+pub struct DropTarget {
+    hwnd: HWND,
+    helper: Option<IDropTargetHelper>,
+    /// What `DragEnter` found (`DragOver` gets no data object).
+    supported: Cell<bool>,
+}
+
+impl DropTarget {
+    pub fn new(hwnd: HWND, helper: Option<IDropTargetHelper>) -> Self {
+        Self { hwnd, helper, supported: Cell::new(false) }
+    }
+
+    /// Our answer, and the drag-over outline to match it.
+    fn answer(&self, allowed: DROPEFFECT) -> DROPEFFECT {
+        let e = rules::choose_effect(allowed, self.supported.get(), shelf::in_own_drag());
+        shelf::set_hot(e != DROPEFFECT_NONE);
+        e
+    }
+}
+
+fn screen(pt: &POINTL) -> POINT {
+    POINT { x: pt.x, y: pt.y }
+}
+
+impl IDropTarget_Impl for DropTarget_Impl {
+    fn DragEnter(&self, obj: Ref<IDataObject>, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, eff: *mut DROPEFFECT) -> Result<()> {
+        let allowed = unsafe { *eff };
+        if let Some(h) = &self.helper {
+            let _ = unsafe { h.DragEnter(self.hwnd, obj.as_ref(), &screen(pt), allowed) };
+        }
+        self.supported.set(obj.as_ref().is_some_and(supported));
+        let e = self.answer(allowed);
+        unsafe { *eff = e };
+        let offered = obj.as_ref().map_or_else(|| "(no data object)".into(), formats::list);
+        log(format!("drag enter: allowed {}, answer {}, offers {offered}", effect_name(allowed), effect_name(e)));
+        Ok(())
+    }
+
+    fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, eff: *mut DROPEFFECT) -> Result<()> {
+        let allowed = unsafe { *eff };
+        if let Some(h) = &self.helper {
+            let _ = unsafe { h.DragOver(&screen(pt), allowed) };
+        }
+        unsafe { *eff = self.answer(allowed) };
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> Result<()> {
+        if let Some(h) = &self.helper {
+            let _ = unsafe { h.DragLeave() };
+        }
+        self.supported.set(false);
+        shelf::set_hot(false);
+        Ok(())
+    }
+
+    fn Drop(&self, obj: Ref<IDataObject>, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, eff: *mut DROPEFFECT) -> Result<()> {
+        let allowed = unsafe { *eff };
+        if let Some(h) = &self.helper {
+            let _ = unsafe { h.Drop(obj.as_ref(), &screen(pt), allowed) };
+        }
+        self.supported.set(false);
+        shelf::set_hot(false);
+        let own = shelf::in_own_drag();
+        let parked = match obj.as_ref() {
+            Some(o) if !own => read(o),
+            _ => None,
+        };
+        let e = rules::choose_effect(allowed, parked.is_some(), own);
+        unsafe { *eff = e };
+        match parked {
+            Some((reader, p)) => {
+                log(format!("drop: {reader}, {} file(s), {:?}, answer {}", p.files.len(), p.kind, effect_name(e)));
+                place(p);
+            }
+            None if own => log("drop of our own Take out: ignored"),
+            None => log(format!("drop: nothing parked, answer {}", effect_name(e))),
+        }
+        Ok(())
+    }
+}

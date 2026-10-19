@@ -165,6 +165,19 @@ impl Model {
         true
     }
 
+    /// The duplicate-Park rule (spec §4): the Item whose files are exactly
+    /// this path set (any order, case-insensitive), if one is on the Shelf.
+    pub fn same_files(&self, files: &[PathBuf]) -> Option<ItemId> {
+        fn key(files: &[PathBuf]) -> BTreeSet<String> {
+            files.iter().map(|f| f.to_string_lossy().to_lowercase()).collect()
+        }
+        let want = key(files);
+        if want.is_empty() {
+            return None;
+        }
+        self.items.iter().find(|i| key(&i.files) == want).map(|i| i.id)
+    }
+
     /// Remove these Items (unknown ids are ignored). Returns how many went.
     pub fn remove(&mut self, ids: &[ItemId]) -> usize {
         let before = self.items.len();
@@ -316,6 +329,25 @@ mod tests {
         assert_eq!(m.remove(&[ids[0], ids[3], 999]), 2);
         assert_eq!(m.len(), 3);
         assert_eq!(m.get(ids[0]), None);
+    }
+
+    #[test]
+    fn same_files_finds_the_item_with_exactly_that_path_set() {
+        let mut m = Model::new();
+        let single = m.add_top(vec![r"C:\x\a.txt".into()], Kind::Reference);
+        let stack = m.add_top(vec![r"C:\x\1.jpg".into(), r"C:\x\2.jpg".into(), r"C:\x\3.jpg".into()], Kind::Reference);
+        let p = |v: &[&str]| v.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt"])), Some(single));
+        // Order and case don't matter (NTFS paths are case-insensitive).
+        assert_eq!(m.same_files(&p(&[r"c:\X\3.JPG", r"C:\x\1.jpg", r"C:\x\2.jpg"])), Some(stack));
+        // A subset, a superset or another file is a new Park.
+        assert_eq!(m.same_files(&p(&[r"C:\x\1.jpg", r"C:\x\2.jpg"])), None);
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\b.txt"])), None);
+        assert_eq!(m.same_files(&p(&[r"C:\x\b.txt"])), None);
+        assert_eq!(m.same_files(&[]), None);
+        // A path listed twice in one drop is still the same set.
+        assert_eq!(m.same_files(&p(&[r"C:\x\a.txt", r"C:\x\a.txt"])), Some(single));
     }
 
     #[test]
