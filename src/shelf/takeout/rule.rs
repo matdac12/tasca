@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Ole::{DROPEFFECT, DROPEFFECT_NONE};
 
-use crate::shelf::model::{path_key, Item, ItemId, Kind};
+use crate::shelf::model::{path_key, Item, Kind};
 
 /// How the drag loop ended, as our `IDropSource` decided it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
-    /// The left button went up.
-    Drop,
+    /// The left button went up, on the Shelf itself or elsewhere.
+    Drop { on_shelf: bool },
     /// Esc, or the loop never reached a drop.
     Cancel,
 }
@@ -21,28 +21,25 @@ pub enum Ending {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outcome {
     pub ending: Ending,
-    /// The drop landed on the Shelf itself.
-    pub on_shelf: bool,
     /// The effect `SHDoDragDrop` returned.
     pub effect: DROPEFFECT,
     /// `Logical Performed DropEffect` read back from the data object, if set.
     pub logical: Option<DROPEFFECT>,
-    /// A Reference file no longer exists at its path.
-    pub reference_gone: bool,
 }
 
 /// The success rule: DROP, not on the Shelf, and some sign that a target took
-/// it. A same-drive Explorer move reports effect NONE with a logical MOVE.
-pub fn succeeded(o: &Outcome) -> bool {
-    let taken = o.effect != DROPEFFECT_NONE || o.logical.is_some_and(|e| e != DROPEFFECT_NONE) || o.reference_gone;
-    o.ending == Ending::Drop && !o.on_shelf && taken
+/// it: an effect, a logical effect, or a Reference file gone (asked only when
+/// nothing else decides). A same-drive Explorer move reports effect NONE with
+/// a logical MOVE.
+pub fn succeeded(o: &Outcome, reference_gone: impl FnOnce() -> bool) -> bool {
+    o.ending == Ending::Drop { on_shelf: false }
+        && (o.effect != DROPEFFECT_NONE || o.logical.is_some_and(|e| e != DROPEFFECT_NONE) || reference_gone())
 }
 
-/// The Items to drag, in order, and the ids left out because a file is gone
+/// The Items to drag, in order, and the ones left out because a file is gone
 /// (a Missing Item can't be Taken out; one missing file makes a Stack missing).
-pub fn split_missing<'a>(items: &[&'a Item], exists: impl Fn(&Path) -> bool) -> (Vec<&'a Item>, Vec<ItemId>) {
-    let (take, missing): (Vec<&Item>, Vec<&Item>) = items.iter().partition(|i| i.files.iter().all(|f| exists(f)));
-    (take, missing.iter().map(|i| i.id).collect())
+pub fn split_missing(items: &[Item], exists: impl Fn(&Path) -> bool) -> (Vec<&Item>, Vec<&Item>) {
+    items.iter().partition(|i| i.files.iter().all(|f| exists(f)))
 }
 
 /// All files share one parent folder, so the shell item array can make the
@@ -56,52 +53,74 @@ pub fn one_folder(paths: &[PathBuf]) -> bool {
 }
 
 /// Some Reference file of these Items is gone (after the drop).
-pub fn reference_gone(items: &[Item], exists: impl Fn(&Path) -> bool) -> bool {
+pub fn reference_gone(items: &[&Item], exists: impl Fn(&Path) -> bool) -> bool {
     items.iter().filter(|i| i.kind == Kind::Reference).flat_map(|i| &i.files).any(|f| !exists(f))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shelf::model::ItemId;
     use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
 
     const NONE: DROPEFFECT = DROPEFFECT_NONE;
     const COPY: DROPEFFECT = DROPEFFECT_COPY;
     const MOVE: DROPEFFECT = DROPEFFECT_MOVE;
 
-    fn out(ending: Ending, on_shelf: bool, effect: DROPEFFECT, logical: Option<DROPEFFECT>, gone: bool) -> Outcome {
-        Outcome { ending, on_shelf, effect, logical, reference_gone: gone }
+    fn out(ending: Ending, effect: DROPEFFECT, logical: Option<DROPEFFECT>) -> Outcome {
+        Outcome { ending, effect, logical }
     }
 
     #[test]
     fn success_rule_truth_table() {
-        use Ending::{Cancel, Drop};
+        const OUT: Ending = Ending::Drop { on_shelf: false };
+        const SHELF: Ending = Ending::Drop { on_shelf: true };
+        const ESC: Ending = Ending::Cancel;
         #[rustfmt::skip]
-        let rows: &[(&str, Outcome, bool)] = &[
-            // ending, on Shelf, effect, logical, Reference gone => Item leaves?
-            ("copy to another drive / Ctrl / Terminal",   out(Drop, false, COPY, None, false), true),
-            ("browser or chat reports MOVE (uploads)",    out(Drop, false, MOVE, None, false), true),
-            ("LINK effect",                               out(Drop, false, DROPEFFECT_LINK, None, false), true),
-            ("same-drive Explorer move (TASCA-8)",        out(Drop, false, NONE, Some(MOVE), true), true),
-            ("optimized move, logical MOVE only",         out(Drop, false, NONE, Some(MOVE), false), true),
-            ("move seen only as a gone path",             out(Drop, false, NONE, None, true), true),
-            ("logical COPY, effect NONE",                 out(Drop, false, NONE, Some(COPY), false), true),
-            ("target refused: everything NONE",           out(Drop, false, NONE, None, false), false),
-            ("logical set to NONE",                       out(Drop, false, NONE, Some(NONE), false), false),
-            ("dropped on own Shelf",                      out(Drop, true, NONE, None, false), false),
-            ("on own Shelf, even if signs say taken",     out(Drop, true, COPY, Some(MOVE), true), false),
-            ("Esc mid-drag",                              out(Cancel, false, NONE, None, false), false),
-            ("Esc, even with a gone path",                out(Cancel, false, NONE, None, true), false),
-            ("cancel with stale effect and logical",      out(Cancel, false, COPY, Some(MOVE), false), false),
-            ("cancel on the Shelf",                       out(Cancel, true, NONE, None, false), false),
+        let rows: &[(&str, Outcome, bool, bool)] = &[
+            // ending, effect, logical; Reference gone => Item leaves?
+            ("copy to another drive / Ctrl / Terminal",   out(OUT, COPY, None), false, true),
+            ("browser or chat reports MOVE (uploads)",    out(OUT, MOVE, None), false, true),
+            ("LINK effect",                               out(OUT, DROPEFFECT_LINK, None), false, true),
+            ("same-drive Explorer move (TASCA-8)",        out(OUT, NONE, Some(MOVE)), true, true),
+            ("optimized move, logical MOVE only",         out(OUT, NONE, Some(MOVE)), false, true),
+            ("move seen only as a gone path",             out(OUT, NONE, None), true, true),
+            ("logical COPY, effect NONE",                 out(OUT, NONE, Some(COPY)), false, true),
+            ("target refused: everything NONE",           out(OUT, NONE, None), false, false),
+            ("logical set to NONE",                       out(OUT, NONE, Some(NONE)), false, false),
+            ("dropped on own Shelf",                      out(SHELF, NONE, None), false, false),
+            ("on own Shelf, even if signs say taken",     out(SHELF, COPY, Some(MOVE)), true, false),
+            ("Esc mid-drag",                              out(ESC, NONE, None), false, false),
+            ("Esc, even with a gone path",                out(ESC, NONE, None), true, false),
+            ("cancel with stale effect and logical",      out(ESC, COPY, Some(MOVE)), false, false),
         ];
-        for (name, o, want) in rows {
-            assert_eq!(succeeded(o), *want, "{name}: {o:?}");
+        for (name, o, gone, want) in rows {
+            assert_eq!(succeeded(o, || *gone), *want, "{name}: {o:?}, gone {gone}");
         }
+    }
+
+    #[test]
+    fn the_disk_is_asked_only_when_nothing_else_decides() {
+        let asked = std::cell::Cell::new(0);
+        let gone = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert!(!succeeded(&out(Ending::Cancel, NONE, None), gone));
+        assert!(!succeeded(&out(Ending::Drop { on_shelf: true }, NONE, None), gone));
+        assert!(succeeded(&out(Ending::Drop { on_shelf: false }, COPY, None), gone));
+        assert!(succeeded(&out(Ending::Drop { on_shelf: false }, NONE, Some(MOVE)), gone));
+        assert_eq!(asked.get(), 0);
+        assert!(succeeded(&out(Ending::Drop { on_shelf: false }, NONE, None), gone));
+        assert_eq!(asked.get(), 1);
     }
 
     fn item(id: ItemId, kind: Kind, files: &[&str]) -> Item {
         Item { id, files: files.iter().map(PathBuf::from).collect(), kind, facts: None }
+    }
+
+    fn ids(items: &[&Item]) -> Vec<ItemId> {
+        items.iter().map(|i| i.id).collect()
     }
 
     #[test]
@@ -112,13 +131,14 @@ mod tests {
         let m = item(4, Kind::Materialized, &[r"C:\t\c.png"]);
         let exists = |p: &Path| !p.to_string_lossy().contains("gone");
 
-        let (take, missing) = split_missing(&[&a, &gone, &stack, &m], exists);
-        assert_eq!(take.iter().map(|i| i.id).collect::<Vec<_>>(), [1, 4]);
-        assert_eq!(missing, [2, 3], "one gone file makes the whole Stack missing");
+        let items = [a, gone, stack, m];
+        let (take, missing) = split_missing(&items, exists);
+        assert_eq!(ids(&take), [1, 4]);
+        assert_eq!(ids(&missing), [2, 3], "one gone file makes the whole Stack missing");
 
-        let (take, missing) = split_missing(&[&gone], exists);
+        let (take, missing) = split_missing(&items[1..2], exists);
         assert!(take.is_empty());
-        assert_eq!(missing, [2]);
+        assert_eq!(ids(&missing), [2]);
     }
 
     #[test]
@@ -132,9 +152,10 @@ mod tests {
         back.facts = Some(crate::shelf::model::Facts { missing: true, ..Default::default() });
         let gone = item(2, Kind::Reference, &[dir.join("not-here.txt").to_str().unwrap()]);
 
-        let (take, missing) = split_missing(&[&back, &gone], |p| p.exists());
-        assert_eq!(take.iter().map(|i| i.id).collect::<Vec<_>>(), [1]);
-        assert_eq!(missing, [2]);
+        let items = [back, gone];
+        let (take, missing) = split_missing(&items, |p| p.exists());
+        assert_eq!(ids(&take), [1]);
+        assert_eq!(ids(&missing), [2]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -157,8 +178,8 @@ mod tests {
         let r = item(1, Kind::Reference, &[r"C:\x\a.txt", r"C:\x\moved.txt"]);
         let m = item(2, Kind::Materialized, &[r"C:\t\moved.png"]);
         let exists = |p: &Path| !p.to_string_lossy().contains("moved");
-        assert!(reference_gone(&[r], exists));
-        assert!(!reference_gone(&[m], exists), "a Materialized file is covered by the effects");
-        assert!(!reference_gone(&[item(3, Kind::Reference, &[r"C:\x\a.txt"])], exists));
+        assert!(reference_gone(&[&r], exists));
+        assert!(!reference_gone(&[&m], exists), "a Materialized file is covered by the effects");
+        assert!(!reference_gone(&[&item(3, Kind::Reference, &[r"C:\x\a.txt"])], exists));
     }
 }

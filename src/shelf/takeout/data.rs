@@ -75,19 +75,22 @@ fn dropfiles(paths: &[PathBuf]) -> Vec<u8> {
 /// `SHCreateDataObject` + `SetData(CF_HDROP)`: still a shell object, so the
 /// drag image and targets' write-backs (`Logical Performed DropEffect`) work.
 fn hdrop(paths: &[PathBuf]) -> Result<IDataObject> {
-    let bytes = dropfiles(paths);
+    let obj: IDataObject = unsafe { SHCreateDataObject(None, None, None::<&IDataObject>)? };
+    set_hglobal(&obj, CF_HDROP.0, &dropfiles(paths))?;
+    Ok(obj)
+}
+
+/// Put `bytes` on the object as `cf` in an `HGLOBAL` the object then owns.
+fn set_hglobal(obj: &IDataObject, cf: u16, bytes: &[u8]) -> Result<()> {
     unsafe {
-        let obj: IDataObject = SHCreateDataObject(None, None, None::<&IDataObject>)?;
         let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len())?;
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), GlobalLock(h) as *mut u8, bytes.len());
         let _ = GlobalUnlock(h);
         let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: ManuallyDrop::new(None) };
-        if let Err(e) = obj.SetData(&hglobal_format(CF_HDROP.0), &medium, true) {
+        obj.SetData(&hglobal_format(cf), &medium, true).inspect_err(|_| {
             // Not taken over: still ours to free.
             let _ = GlobalFree(Some(h));
-            return Err(e);
-        }
-        Ok(obj)
+        })
     }
 }
 
@@ -196,13 +199,7 @@ mod tests {
         let (obj, _) = build(&paths).unwrap();
         assert_eq!(read_dword(&obj, CFSTR_LOGICALPERFORMEDDROPEFFECT), None);
         // What Explorer does after an optimized move: logical effect MOVE.
-        let h = unsafe { GlobalAlloc(GMEM_MOVEABLE, 4).unwrap() };
-        unsafe {
-            (GlobalLock(h) as *mut u32).write_unaligned(2);
-            let _ = GlobalUnlock(h);
-            let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: ManuallyDrop::new(None) };
-            obj.SetData(&hglobal_format(cf(CFSTR_LOGICALPERFORMEDDROPEFFECT)), &medium, true).unwrap();
-        }
+        set_hglobal(&obj, cf(CFSTR_LOGICALPERFORMEDDROPEFFECT), &2u32.to_le_bytes()).unwrap();
         assert_eq!(read_dword(&obj, CFSTR_LOGICALPERFORMEDDROPEFFECT), Some(2));
         std::fs::remove_dir_all(dir).unwrap();
     }

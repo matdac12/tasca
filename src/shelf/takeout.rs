@@ -15,9 +15,11 @@ mod data;
 mod rule;
 
 use std::cell::Cell;
+use std::path::Path;
 
-use windows::core::{implement, ComObject, BOOL, HRESULT};
+use windows::core::{implement, ComObject, BOOL, HRESULT, HSTRING};
 use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, POINT, S_OK};
+use windows::Win32::Storage::FileSystem::{GetFileAttributesW, INVALID_FILE_ATTRIBUTES};
 use windows::Win32::System::Ole::{
     IDropSource, IDropSource_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, DROPEFFECT_NONE,
 };
@@ -26,25 +28,26 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 use windows::Win32::UI::Shell::{SHDoDragDrop, CFSTR_LOGICALPERFORMEDDROPEFFECT};
 use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetCursorPos, WindowFromPoint, GA_ROOT};
 
-use super::model::{Item, ItemId};
-use super::probe;
+use super::model::{Facts, ItemId};
 use crate::log::log;
 use rule::{Ending, Outcome};
 
 pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
-    // Re-check on the disk right before the drag (spec §3): a Missing Item
-    // can't be Taken out.
-    let Some((items, missing)) = super::with(|s| {
-        let items: Vec<&Item> = ids.iter().filter_map(|&id| s.model.get(id)).collect();
-        let (take, missing) = rule::split_missing(&items, |p| p.exists());
-        (take.into_iter().cloned().collect::<Vec<_>>(), s.file_jobs(Some(&missing)))
-    }) else {
+    let Some(candidates) = super::with(|s| ids.iter().filter_map(|&id| s.model.get(id).cloned()).collect::<Vec<_>>())
+    else {
         return;
     };
+    // Re-check on the disk right before the drag (spec §3): a Missing Item
+    // can't be Taken out.
+    let (items, missing) = rule::split_missing(&candidates, exists);
     if !missing.is_empty() {
-        log(format!("take out: {:?} missing, not dragged", missing.iter().map(|(id, _)| id).collect::<Vec<_>>()));
-        // Probe them again so the rows show "Missing".
-        probe::request(hwnd, missing, false);
+        log(format!("take out: {:?} missing, not dragged", missing.iter().map(|i| i.id).collect::<Vec<_>>()));
+        super::with(|s| {
+            for i in &missing {
+                s.model.set_facts(i.id, Facts { missing: true, ..i.facts.unwrap_or_default() });
+            }
+            s.refresh();
+        });
     }
     if items.is_empty() {
         return;
@@ -59,7 +62,7 @@ pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
         }
     };
 
-    let source = ComObject::new(DropSource { hwnd, ending: Cell::new(Ending::Cancel), on_shelf: Cell::new(false) });
+    let source = ComObject::new(DropSource { hwnd, ending: Cell::new(Ending::Cancel) });
     let r = {
         let _own = OwnDrag::start();
         unsafe { SHDoDragDrop(Some(hwnd), &obj, &source.to_interface::<IDropSource>(), DROPEFFECT_COPY | DROPEFFECT_MOVE) }
@@ -69,32 +72,38 @@ pub fn start(hwnd: HWND, ids: Vec<ItemId>) {
     }
     let o = Outcome {
         ending: source.ending.get(),
-        on_shelf: source.on_shelf.get(),
         effect: r.unwrap_or(DROPEFFECT_NONE),
         logical: data::read_dword(&obj, CFSTR_LOGICALPERFORMEDDROPEFFECT).map(DROPEFFECT),
-        reference_gone: rule::reference_gone(&items, |p| p.exists()),
     };
-    let success = rule::succeeded(&o);
+    let mut gone = None;
+    let success = rule::succeeded(&o, || *gone.insert(rule::reference_gone(&items, exists)));
     log(format!(
-        "take out of {ids:?} via {via:?}: ended {:?}, on the Shelf {}, effect {}, logical {}, Reference gone {} => {}",
+        "take out of {ids:?} via {via:?}: ended {:?}, effect {}, logical {}, Reference gone {} => {}",
         o.ending,
-        o.on_shelf,
         effect_name(o.effect),
         o.logical.map_or("(absent)".into(), effect_name),
-        o.reference_gone,
+        gone.map_or("(not checked)".into(), |g| g.to_string()),
         if success { "Item(s) leave" } else { "kept" },
     ));
 
-    // The cursor is elsewhere now: forget hover and press.
+    // One render: the cursor is elsewhere now (forget hover and press), and
+    // the Items leave on success.
     super::with(|s| {
         s.reset_pointer();
+        if success {
+            s.model.remove(&ids);
+        }
         s.refresh();
     });
+    // The Shelf hides only after the last Item is Taken out (TASCA-8).
     if success {
-        super::remove(&ids);
-        // The Shelf hides only after the last Item is Taken out (TASCA-8).
         super::hide_if_empty();
     }
+}
+
+/// One attribute lookup, no handle opened (cheaper than `Path::exists`).
+fn exists(p: &Path) -> bool {
+    unsafe { GetFileAttributesW(&HSTRING::from(p)) != INVALID_FILE_ATTRIBUTES }
 }
 
 fn effect_name(e: DROPEFFECT) -> String {
@@ -132,12 +141,11 @@ fn cursor_on(hwnd: HWND) -> bool {
     }
 }
 
-/// Records how the drag ended, and whether the drop landed on the Shelf.
+/// Records how the drag ended, and for a drop whether it landed on the Shelf.
 #[implement(IDropSource)]
 struct DropSource {
     hwnd: HWND,
     ending: Cell<Ending>,
-    on_shelf: Cell<bool>,
 }
 
 impl IDropSource_Impl for DropSource_Impl {
@@ -148,8 +156,7 @@ impl IDropSource_Impl for DropSource_Impl {
             self.ending.set(Ending::Cancel);
             DRAGDROP_S_CANCEL
         } else if keys.0 & MK_LBUTTON.0 == 0 {
-            self.ending.set(Ending::Drop);
-            self.on_shelf.set(cursor_on(self.hwnd));
+            self.ending.set(Ending::Drop { on_shelf: cursor_on(self.hwnd) });
             DRAGDROP_S_DROP
         } else {
             S_OK
