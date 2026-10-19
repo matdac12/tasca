@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::layout::{past_drag_threshold, Hit};
 use super::model::{ItemId, Mods};
-use super::{open, probe, takeout, with, Press, Shelf, T_ANIM};
+use super::{open, takeout, with, Press, Shelf, T_ANIM};
 use crate::log::log;
 use crate::proto::WM_PROBED;
 
@@ -59,8 +59,7 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         WM_TIMER if wp.0 == T_ANIM => super::tick(),
         // The Shelf positions itself on every show; ignore the suggested rect.
         WM_DPICHANGED => {}
-        // SAFETY: WM_PROBED is only posted by the probe worker, with a boxed payload.
-        WM_PROBED => super::on_probed(unsafe { probe::take(lp) }),
+        WM_PROBED => super::on_probed(),
         WM_MOUSEMOVE => mouse_move(hwnd, wp, lp),
         WM_MOUSELEAVE => {
             with(|s| {
@@ -68,32 +67,15 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
                 set_hover(s, None);
             });
         }
-        WM_LBUTTONDOWN => {
-            let (x, y) = xy(lp);
-            let m = mods(wp);
-            with(|s| match s.layout.hit(x, y, s.scroll) {
-                Hit::Row(i) => {
-                    let deferred = s.model.press(i, m);
-                    s.press = Some(Press { at: (x, y), id: s.model.items()[i].id, deferred });
-                    if !deferred {
-                        s.refresh();
-                    }
-                }
-                Hit::Header | Hit::Panel => {
-                    if s.model.select_none() {
-                        s.refresh();
-                    }
-                }
-                Hit::ClearAll | Hit::Margin => {}
-            });
-            unsafe { SetCapture(hwnd) };
-        }
+        WM_LBUTTONDOWN => button_down(hwnd, wp, lp),
         WM_LBUTTONUP => {
             let (x, y) = xy(lp);
             with(|s| {
                 let press = s.press.take();
+                let clear_armed = std::mem::take(&mut s.clear_armed);
                 match s.layout.hit(x, y, s.scroll) {
-                    Hit::ClearAll => {
+                    // Only a press that also started on "Clear all".
+                    Hit::ClearAll if clear_armed => {
                         log("Clear all");
                         s.clear_all();
                     }
@@ -110,12 +92,19 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
             }
         }
         WM_CAPTURECHANGED => {
-            with(|s| s.press = None);
+            with(|s| {
+                s.press = None;
+                s.clear_armed = false;
+            });
         }
+        // CS_DBLCLKS turns the second press into this: it is still a press (for
+        // selection and dragging), and a plain one also opens the row.
         WM_LBUTTONDBLCLK => {
+            button_down(hwnd, wp, lp);
             let (x, y) = xy(lp);
+            let plain = mods(wp) == Mods::default();
             let file = with(|s| match s.layout.hit(x, y, s.scroll) {
-                Hit::Row(i) => s.model.items().get(i).filter(|it| !it.missing()).map(|it| it.files[0].clone()),
+                Hit::Row(i) if plain => s.model.items().get(i).filter(|it| !it.missing()).map(|it| it.files[0].clone()),
                 _ => None,
             })
             .flatten();
@@ -144,6 +133,28 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         _ => return None,
     }
     Some(LRESULT(0))
+}
+
+fn button_down(hwnd: HWND, wp: WPARAM, lp: LPARAM) {
+    let (x, y) = xy(lp);
+    let m = mods(wp);
+    with(|s| match s.layout.hit(x, y, s.scroll) {
+        Hit::Row(i) => {
+            let deferred = s.model.press(i, m);
+            s.press = Some(Press { at: (x, y), id: s.model.items()[i].id, deferred });
+            if !deferred {
+                s.refresh();
+            }
+        }
+        Hit::Header | Hit::Panel => {
+            if s.model.select_none() {
+                s.refresh();
+            }
+        }
+        Hit::ClearAll => s.clear_armed = true,
+        Hit::Margin => {}
+    });
+    unsafe { SetCapture(hwnd) };
 }
 
 fn mouse_move(hwnd: HWND, wp: WPARAM, lp: LPARAM) {

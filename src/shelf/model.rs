@@ -8,12 +8,14 @@ use std::path::PathBuf;
 /// can post results by id after the list has changed.
 pub type ItemId = u64;
 
+// Built by the Park (TASCA-14) and Materialize (TASCA-16) slices; until then
+// only the debug `--seed` makes References.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// A real file or folder, kept by path.
     Reference,
     /// Content written to `%TEMP%\Tasca\<drop-id>\` (TASCA-16).
-    #[allow(dead_code)] // TASCA-16
     Materialized,
 }
 

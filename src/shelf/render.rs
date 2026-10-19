@@ -170,7 +170,7 @@ pub(super) fn text_format(
     }
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub(super) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 

@@ -1,9 +1,11 @@
 //! The Shelf (spec §3): Item list, drawing, position, motion and mouse.
 //!
 //! All state lives on the UI thread in `SHELF`. Every function here must be
-//! called on that thread. Calls that can send messages back into the wndproc
-//! (`SetWindowPos`, `ShowWindow`, `TrackPopupMenu`, drag loops, ...) are made
-//! outside `with`, which is short and non-reentrant.
+//! called on that thread. `with` is short and non-reentrant: a nested call is
+//! skipped. Calls that can send the window a message the Shelf itself handles
+//! (`SetWindowPos`, `ShowWindow`, `ReleaseCapture`, `TrackPopupMenu`, drag
+//! loops, ...) are made outside it. `UpdateLayeredWindow` inside it only sends
+//! `WM_WINDOWPOS*`, which go to `DefWindowProcW`.
 //!
 //! Hooks for later slices (no-ops or plain setters until they land):
 //! `add_top`, `move_to_top`, `remove`, `hide_if_empty`, `set_hot`,
@@ -66,6 +68,8 @@ struct Shelf {
     hot: bool,
     in_own_drag: bool,
     press: Option<Press>,
+    /// The left button went down on "Clear all".
+    clear_armed: bool,
     tracking_leave: bool,
 }
 
@@ -172,6 +176,9 @@ impl Shelf {
         self.hot = false;
         self.hover = None;
         self.press = None;
+        self.clear_armed = false;
+        // A hidden window may never get its WM_MOUSELEAVE: re-arm on the next move.
+        self.tracking_leave = false;
     }
 
     fn file_jobs(&self, only: Option<&[ItemId]>) -> Vec<(ItemId, Vec<PathBuf>)> {
@@ -207,6 +214,7 @@ pub fn create(hwnd: HWND) -> Result<()> {
         hot: false,
         in_own_drag: false,
         press: None,
+        clear_armed: false,
         tracking_leave: false,
     };
     #[cfg(debug_assertions)]
@@ -228,11 +236,12 @@ fn files_need_work(hwnd: HWND, jobs: Vec<(ItemId, Vec<PathBuf>)>, recheck: bool)
     probe::request(hwnd, jobs, recheck);
 }
 
-/// `WM_PROBED`: store the facts, re-render if any changed.
-fn on_probed(probed: probe::Probed) {
+/// `WM_PROBED`: store the facts, re-render if any changed. Drained inside
+/// `with`, so a skipped (re-entrant) call leaves them queued for the next one.
+fn on_probed() {
     with(|s| {
         let mut changed = false;
-        for (id, facts) in probed.facts {
+        for (id, facts) in probe::take() {
             changed |= s.model.set_facts(id, facts);
         }
         if changed {

@@ -12,7 +12,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 
 use super::model::Item;
-use super::render::{rr, text_format};
+use super::render::{rr, text_format, wide};
 
 pub const TILE: f32 = 30.0;
 const TILE_RADIUS: f32 = 6.0;
@@ -53,7 +53,7 @@ impl Tiles {
             } else if !image {
                 let ext = item.ext();
                 if !ext.is_empty() {
-                    let label: Vec<u16> = ext.chars().take(4).collect::<String>().encode_utf16().collect();
+                    let label = wide(&ext.chars().take(4).collect::<String>());
                     let color = if ext == "PDF" { PDF_RED } else { LABEL };
                     rt.DrawText(&label, &self.label, &r, &brush(color)?, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
