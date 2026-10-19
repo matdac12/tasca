@@ -48,7 +48,7 @@ const T_HIDE_AFTER_PARK: usize = 2;
 const PANEL_W: f32 = 200.0;
 const PAD: f32 = 8.0;
 const HEAD_H: f32 = 22.0;
-const HEAD_EMPTY_H: f32 = 16.0;
+const HEAD_EMPTY_H: f32 = 48.0; // Mattia (TASCA-8): the empty strip at 32 DIP was too small; doubled to 64.
 const ROW_H: f32 = 40.0;
 const EDGE_GAP: f32 = 8.0;
 
@@ -97,6 +97,7 @@ struct Flags {
     no_shadow: bool,      // no shadow margin
     focus_on_drag: bool,  // SetForegroundWindow(shelf) when a Take out starts
     allow_elevated: bool, // let an elevated process become the resident (negative control)
+    hide_after_park: bool, // hide 450 ms after a Park (the TASCA-2 rule)
 }
 
 fn read_flags() -> Flags {
@@ -115,6 +116,7 @@ fn read_flags() -> Flags {
         no_shadow: has("no-shadow"),
         focus_on_drag: has("focus-on-drag"),
         allow_elevated: has("allow-elevated"),
+        hide_after_park: has("hide-after-park"),
     }
 }
 
@@ -1006,8 +1008,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
             }));
             st.refresh();
         });
-        // Hide after Drop has returned, never inside it.
-        unsafe { SetTimer(Some(hwnd), T_HIDE_AFTER_PARK, 450, None) };
+        // Mattia (TASCA-8): the Shelf stays after a Park. `hide-after-park` restores the old rule.
+        // When on, hide after Drop has returned, never inside it.
+        if with(|st| st.flags.hide_after_park) == Some(true) {
+            unsafe { SetTimer(Some(hwnd), T_HIDE_AFTER_PARK, 450, None) };
+        }
         Ok(())
     }
 }
@@ -1140,16 +1145,18 @@ fn take_out(idx: usize) {
             if success { "SUCCESS, Item leaves" } else { "kept" },
             fg()
         ));
-        with(|st| {
+        let empty = with(|st| {
             st.in_own_drag = false;
             if success && idx < st.items.len() {
                 st.items.remove(idx);
             }
             st.hover = None;
             st.refresh();
+            st.items.is_empty()
         });
-        if success {
-            hide_shelf("after Take out");
+        // Mattia (TASCA-8): the Shelf hides only when the last Item is Taken out (or on Caps+D).
+        if success && empty == Some(true) {
+            hide_shelf("last Item Taken out");
         }
     }
 }
