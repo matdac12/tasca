@@ -43,4 +43,4 @@ Builds a release, ends the spike and any running installed Tasca (waits up to
 10 s for it to exit), copies `tasca.exe` to `%LOCALAPPDATA%\Tasca\`, creates or
 refreshes the Startup shortcut `Tasca.lnk` (`tasca.exe --hidden`) and starts it
 hidden. Rerun it to update. Caps+D in `hyper.ahk` runs
-`%LOCALAPPDATA%\Tasca	asca.exe toggle`.
+`%LOCALAPPDATA%\Tasca\tasca.exe toggle`.
