@@ -4,6 +4,7 @@ mod launch;
 mod log;
 mod proto;
 mod resident;
+mod shelf;
 
 fn main() {
     log::now_ms(); // start the clock

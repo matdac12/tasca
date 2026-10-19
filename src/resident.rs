@@ -1,5 +1,5 @@
 //! The resident: mutex, the hidden `Tasca.Shelf` window, wndproc dispatch and
-//! the message loop. Later slices hook into `on_toggle` / `on_show`.
+//! the message loop. The Shelf (`crate::shelf`) sees every message first.
 
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{
@@ -15,19 +15,25 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
 use crate::proto::{CLASS, MUTEX, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
+use crate::shelf;
 
-/// Caps+D while resident. No-op until the Shelf slice.
+/// Caps+D while resident.
 fn on_toggle(_hwnd: HWND) {
     log("toggle");
+    shelf::toggle();
 }
 
-/// Show request. No-op until the Shelf slice.
+/// Show request (plain `tasca.exe`, or a cold start without `--hidden`).
 fn on_show(_hwnd: HWND) {
     log("show");
+    shelf::show();
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
+        if let Some(r) = shelf::handle(hwnd, msg, wp, lp) {
+            return r;
+        }
         match msg {
             WM_TOGGLE => {
                 on_toggle(hwnd);
@@ -44,6 +50,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_DESTROY => {
+                shelf::destroy();
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -76,6 +83,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         let hinst = GetModuleHandleW(None)?.into();
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -102,6 +110,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         )?;
         let off = 1i32;
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &off as *const _ as _, 4);
+        shelf::create(hwnd)?;
 
         let pmv2 = AreDpiAwarenessContextsEqual(
             GetThreadDpiAwarenessContext(),

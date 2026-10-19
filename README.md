@@ -18,6 +18,7 @@ tasca.exe [toggle | quit | --hidden]
 One resident per user. `toggle` (Caps+D) and no argument post to the running
 resident, or start it if none is running; `quit` ends it; `--hidden` starts it
 without showing anything (the Startup shortcut).
+Debug builds only: `--seed <path>…` parks those paths at startup, last on top (`a|b|c` = one Stack).
 
 ## Build
 
