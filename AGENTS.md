@@ -25,6 +25,9 @@ Rules for anyone (human or agent) changing this repo.
 - **Tests:** keep decisions pure and unit-test them. Integration tests start a
   real resident, so they need `Tasca.Shelf` free (end `tasca-spike.exe` and any
   other `tasca.exe`) and they run one at a time.
+- **Installed Tasca:** a hidden resident runs permanently. Before `cargo test`,
+  quit it with `"%LOCALAPPDATA%\Tasca	asca.exe" quit`; restart it afterwards
+  with `scripts/install.ps1` or `tasca.exe --hidden`.
 
 ## Checks (CI runs the same three on `windows-latest`)
 
