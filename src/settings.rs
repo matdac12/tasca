@@ -46,13 +46,18 @@ pub fn save(settings: &Settings) -> Result<(), String> {
     }
     let tmp = path.with_extension("ini.tmp");
     std::fs::write(&tmp, render(settings)).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp); // no stray .tmp after a failed save
+        format!("{}: {e}", path.display())
+    })
 }
 
 /// Parse the ini text. Unknown keys and junk lines are ignored; a missing or
 /// unparseable `shortcut` value means the default (an explicit `None` or an
 /// empty value means no shortcut).
 pub fn parse(text: &str) -> Settings {
+    // Notepad (and Windows PowerShell 5) like to prepend a UTF-8 byte order mark.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = Settings::default();
     for line in text.lines() {
         let line = line.trim();
@@ -69,11 +74,27 @@ pub fn parse(text: &str) -> Settings {
         out.shortcut = if value.is_empty() || value.eq_ignore_ascii_case("none") {
             None
         } else {
-            // A shortcut line we cannot read is the "garbled file" case.
-            Some(Hotkey::parse(value).unwrap_or(Hotkey::DEFAULT))
+            // A shortcut we cannot read, or one that is not safe to grab
+            // globally (hand-edited file), is the "garbled file" case.
+            Some(
+                Hotkey::parse(value)
+                    .filter(Hotkey::is_safe)
+                    .unwrap_or(Hotkey::DEFAULT),
+            )
         };
     }
     out
+}
+
+/// The tray-tooltip notice for a failed background apply, `None` when both
+/// steps worked. `start` is the Startup-shortcut error, `save` the ini error.
+pub fn failure_notice(start: Option<&str>, save: Option<&str>) -> Option<String> {
+    match (start.is_some(), save.is_some()) {
+        (false, false) => None,
+        (true, false) => Some("Start with Windows failed".to_string()),
+        (false, true) => Some("settings not saved".to_string()),
+        (true, true) => Some("settings not saved, Start with Windows failed".to_string()),
+    }
 }
 
 pub fn render(settings: &Settings) -> String {
@@ -148,6 +169,41 @@ mod tests {
                 shortcut: Hotkey::parse("Ctrl+Alt+E")
             }
         );
+    }
+
+    #[test]
+    fn a_utf8_bom_is_ignored() {
+        let s = parse("\u{feff}shortcut=Ctrl+Alt+E\n");
+        assert_eq!(s.shortcut, Hotkey::parse("Ctrl+Alt+E"));
+        assert_eq!(parse("\u{feff}shortcut=None\n").shortcut, None);
+    }
+
+    #[test]
+    fn unsafe_shortcuts_fall_back_to_the_default() {
+        for text in ["D", "Shift+D", "Ctrl+C", "Alt+F4", "Alt+Tab", "Ctrl+S"] {
+            assert_eq!(
+                parse(&format!("shortcut={text}\n")),
+                Settings::default(),
+                "{text}"
+            );
+        }
+        assert_eq!(parse("shortcut=F13\n").shortcut, Hotkey::parse("F13"));
+    }
+
+    #[test]
+    fn failure_notices() {
+        assert_eq!(failure_notice(None, None), None);
+        assert_eq!(
+            failure_notice(Some("x"), None).as_deref(),
+            Some("Start with Windows failed")
+        );
+        assert_eq!(
+            failure_notice(None, Some("x")).as_deref(),
+            Some("settings not saved")
+        );
+        assert!(failure_notice(Some("x"), Some("y"))
+            .unwrap()
+            .contains("not saved"));
     }
 
     #[test]

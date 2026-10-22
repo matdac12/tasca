@@ -39,10 +39,13 @@ fn log_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Tasca"))
 }
 
-/// Start a fresh log. Only the resident calls this, once, at start.
+/// Start a fresh log, keeping the previous run's as `tasca.log.1` (TASCA-25:
+/// the evidence of a failed save used to vanish on restart). Only the
+/// resident calls this, once, at start.
 pub fn truncate() {
     if let Some(dir) = log_dir() {
         let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::rename(dir.join("tasca.log"), dir.join("tasca.log.1"));
         let _ = std::fs::File::create(dir.join("tasca.log"));
     }
 }

@@ -3,7 +3,7 @@
 //! (`TaskbarCreated`). All on the resident's UI thread.
 
 use std::cell::RefCell;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
@@ -40,6 +40,11 @@ struct State {
     icon: Option<HICON>,
     tip: String,
 }
+
+/// Failure from the last background apply of the settings, shown in the
+/// tooltip until the next apply succeeds. Written by the settings worker
+/// thread, read on the UI thread.
+static NOTICE: Mutex<Option<String>> = Mutex::new(None);
 
 thread_local! {
     static TRAY: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -103,34 +108,54 @@ pub fn add(hwnd: HWND, tip: String) {
     TRAY.with(|t| *t.borrow_mut() = Some(State { hwnd, icon, tip }));
 }
 
+/// Copy the icon data out. `Shell_NotifyIconW` pumps messages (a re-entrant
+/// `TaskbarCreated` calls back in here), so no `TRAY` borrow may span it.
+fn snapshot() -> Option<(HWND, Option<HICON>, String)> {
+    TRAY.with(|t| {
+        let t = t.try_borrow().ok()?;
+        t.as_ref().map(|s| (s.hwnd, s.icon, s.tip.clone()))
+    })
+}
+
 /// Re-add after Explorer restarted (the shell forgets every icon).
 pub fn re_add() {
-    TRAY.with(|t| {
-        let mut t = t.borrow_mut();
-        let Some(state) = t.as_mut() else { return };
-        let d = data(state.hwnd, state.icon, &state.tip.clone());
-        if unsafe { Shell_NotifyIconW(NIM_ADD, &d) }.as_bool() {
-            log("tray: re-added after TaskbarCreated");
-        } else {
-            log("tray: re-add after TaskbarCreated failed");
-        }
-    });
+    let Some((hwnd, icon, tip)) = snapshot() else {
+        return;
+    };
+    let d = data(hwnd, icon, &tip);
+    if unsafe { Shell_NotifyIconW(NIM_ADD, &d) }.as_bool() {
+        log("tray: re-added after TaskbarCreated");
+    } else {
+        log("tray: re-add after TaskbarCreated failed");
+    }
 }
 
 /// Update the tooltip (shortcut changed or registration failed).
 pub fn update_tip(tip: &str) {
-    TRAY.with(|t| {
-        let mut t = t.borrow_mut();
-        let Some(state) = t.as_mut() else { return };
+    let changed = TRAY.with(|t| {
+        let mut t = t.try_borrow_mut().ok()?;
+        let state = t.as_mut()?;
         if state.tip == tip {
-            return;
+            return None;
         }
         state.tip = tip.to_string();
-        let d = data(state.hwnd, state.icon, tip);
-        if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) }.as_bool() {
-            log("tray: Shell_NotifyIcon(NIM_MODIFY) failed");
-        }
+        Some((state.hwnd, state.icon))
     });
+    let Some((hwnd, icon)) = changed else { return };
+    let d = data(hwnd, icon, tip);
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &d) }.as_bool() {
+        log("tray: Shell_NotifyIcon(NIM_MODIFY) failed");
+    }
+}
+
+/// Failure from the last background apply of the settings (shown in the
+/// tooltip until the next apply succeeds).
+pub fn set_notice(notice: Option<String>) {
+    *NOTICE.lock().unwrap_or_else(|p| p.into_inner()) = notice;
+}
+
+pub fn notice() -> Option<String> {
+    NOTICE.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
 pub fn remove() {
@@ -146,15 +171,21 @@ pub fn remove() {
 /// Refresh the tooltip from the current shortcut state.
 pub fn refresh() {
     let (shortcut, error) = crate::hotkey::display();
-    update_tip(&tip(shortcut, error.as_deref()));
+    let notice = notice();
+    update_tip(&tip(shortcut, error.as_deref(), notice.as_deref()));
 }
 
-/// Tooltip text: `Tasca (Ctrl+Alt+D)`, plus the reason when registration failed.
-pub fn tip(shortcut: Option<Hotkey>, error: Option<&str>) -> String {
-    match (shortcut, error) {
+/// Tooltip text: `Tasca (Ctrl+Alt+D)`, plus the reason when registration
+/// failed, plus a failed settings apply.
+pub fn tip(shortcut: Option<Hotkey>, error: Option<&str>, notice: Option<&str>) -> String {
+    let base = match (shortcut, error) {
         (Some(hk), None) => format!("Tasca ({})", hk.text()),
         (Some(hk), Some(_)) => format!("Tasca ({}, unavailable)", hk.text()),
         (None, _) => "Tasca (no shortcut)".to_string(),
+    };
+    match notice {
+        Some(n) => format!("{base} - {n}"),
+        None => base,
     }
 }
 
@@ -225,13 +256,17 @@ mod tests {
     #[test]
     fn tooltip_shows_the_shortcut_and_failures() {
         let hk = Hotkey::DEFAULT;
-        assert_eq!(tip(Some(hk), None), "Tasca (Ctrl+Alt+D)");
+        assert_eq!(tip(Some(hk), None, None), "Tasca (Ctrl+Alt+D)");
         assert_eq!(
-            tip(Some(hk), Some("taken")),
+            tip(Some(hk), Some("taken"), None),
             "Tasca (Ctrl+Alt+D, unavailable)"
         );
-        assert_eq!(tip(None, None), "Tasca (no shortcut)");
-        assert_eq!(tip(None, Some("taken")), "Tasca (no shortcut)");
+        assert_eq!(tip(None, None, None), "Tasca (no shortcut)");
+        assert_eq!(tip(None, Some("taken"), None), "Tasca (no shortcut)");
+        assert_eq!(
+            tip(Some(hk), None, Some("settings not saved")),
+            "Tasca (Ctrl+Alt+D) - settings not saved"
+        );
     }
 
     #[test]
