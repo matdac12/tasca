@@ -35,8 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   right-click for **Show shelf**, **Settings…** and **Quit**. It is re-added
   when Explorer restarts.
 - A global shortcut to show or hide the Shelf, **Ctrl+Alt+D** by default, with
-  a recorder in Settings for any Ctrl, Alt, Shift or Win combination, or
-  **None**.
+  a recorder in Settings for any combination that includes Ctrl, Alt or Win
+  (Shift alone is not enough) or an F13–F24 key on its own, or **None**.
 - Settings window: record or clear the global shortcut, turn **Start with
   Windows** on or off, and see the installed version.
 - Settings persist in `%LOCALAPPDATA%\Tasca\settings.ini` as plain `key=value`
