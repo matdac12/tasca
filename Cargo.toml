@@ -40,6 +40,12 @@ features = [
     "Win32_UI_WindowsAndMessaging",
 ]
 
+[build-dependencies]
+# Compiles assets/tasca.rc (the icon) and links the .res into the exe. Writing
+# a .res by hand or shelling out to rc.exe ourselves is worse; the manifest
+# stays on the linker (/MANIFEST:EMBED) in build.rs.
+embed-resource = "3.0.12"
+
 [profile.release]
 lto = true
 codegen-units = 1

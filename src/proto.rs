@@ -20,6 +20,10 @@ pub const WM_PROBED: u32 = WM_APP + 4;
 pub const WM_THUMB_READY: u32 = WM_APP + 16;
 /// TASCA-16: a Park worker finished (files written, async drop read). No pointer in the message.
 pub const WM_PARK_DONE: u32 = WM_APP + 17;
+/// TASCA-24: the notification icon was clicked; `lParam` is the mouse message.
+pub const WM_TRAY: u32 = WM_APP + 18;
+/// TASCA-24: the shortcut recorder finished; the field removes its keyboard hook.
+pub const WM_RECORD_STOP: u32 = WM_APP + 19;
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +31,16 @@ mod tests {
 
     #[test]
     fn message_numbers_are_distinct() {
-        let all = [WM_TOGGLE, WM_SHOW, WM_QUIT_RESIDENT, WM_PROBED, WM_THUMB_READY, WM_PARK_DONE];
+        let all = [
+            WM_TOGGLE,
+            WM_SHOW,
+            WM_QUIT_RESIDENT,
+            WM_PROBED,
+            WM_THUMB_READY,
+            WM_PARK_DONE,
+            WM_TRAY,
+            WM_RECORD_STOP,
+        ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");
         }

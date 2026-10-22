@@ -15,7 +15,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
 use crate::proto::{CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
-use crate::{park, shelf};
+use crate::{hotkey, park, settings, settings_win, shelf, tray};
 
 /// Caps+D while resident.
 fn on_toggle(_hwnd: HWND) {
@@ -34,7 +34,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         if let Some(r) = shelf::handle(hwnd, msg, wp, lp) {
             return r;
         }
+        if msg == tray::taskbar_created() {
+            tray::re_add();
+            return LRESULT(0);
+        }
+        if tray::handle(hwnd, msg, lp) {
+            return LRESULT(0);
+        }
         match msg {
+            WM_HOTKEY if wp.0 as i32 == hotkey::REGISTER_ID => {
+                on_toggle(hwnd);
+                LRESULT(0)
+            }
             WM_TOGGLE => {
                 on_toggle(hwnd);
                 LRESULT(0)
@@ -54,6 +65,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_DESTROY => {
+                tray::remove();
+                hotkey::unregister(hwnd);
+                settings_win::close();
                 park::revoke(hwnd);
                 shelf::destroy();
                 PostQuitMessage(0);
@@ -120,6 +134,20 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         park::register(hwnd);
         park::sweep::start();
 
+        // TASCA-24: settings, the global shortcut and the tray icon.
+        let configured = settings::load();
+        match configured.shortcut {
+            Some(hk) => log(format!("settings: shortcut {}", hk.text())),
+            None => log("settings: shortcut cleared"),
+        }
+        let _ = hotkey::start(hwnd, configured.shortcut);
+        let (shortcut, shortcut_error) = hotkey::display();
+        tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref()));
+        #[cfg(debug_assertions)]
+        if std::env::var_os("TASCA_DEV_SETTINGS").is_some() {
+            settings_win::open(hwnd);
+        }
+
         let pmv2 = AreDpiAwarenessContextsEqual(
             GetThreadDpiAwarenessContext(),
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -133,6 +161,10 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         let mut msg = MSG::default();
         // 0 = WM_QUIT, -1 = error: both end the loop.
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            // Tab/Esc for the settings window while it is open.
+            if settings_win::pre_translate(&msg) {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
