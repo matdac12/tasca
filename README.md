@@ -2,7 +2,7 @@
 
 A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, drag them out into any app.
 
-![The Tasca shelf with a few parked files](docs/images/preview.png)
+![Tasca demo: summon the Shelf mid-drag, park files, drag them out again](docs/images/demo.gif)
 
 ## What it does
 
@@ -31,6 +31,8 @@ A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, dra
   log); that is all it writes.
 
 Pure Rust on plain Win32/OLE: no webview, no Electron, no runtime to install.
+
+![The Shelf with a Stack of two PowerShell files (setup.ps1 +1) and CLAUDE.md](docs/images/shelf.png)
 
 ## Download & install
 
