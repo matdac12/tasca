@@ -24,6 +24,8 @@ pub const WM_PARK_DONE: u32 = WM_APP + 17;
 pub const WM_TRAY: u32 = WM_APP + 18;
 /// TASCA-24: the shortcut recorder finished; the field removes its keyboard hook.
 pub const WM_RECORD_STOP: u32 = WM_APP + 19;
+/// TASCA-26: the settings worker finished saving; the resident shows a failure in the tray tooltip.
+pub const WM_SETTINGS_SAVED: u32 = WM_APP + 20;
 
 #[cfg(test)]
 mod tests {
@@ -40,6 +42,7 @@ mod tests {
             WM_PARK_DONE,
             WM_TRAY,
             WM_RECORD_STOP,
+            WM_SETTINGS_SAVED,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");

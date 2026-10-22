@@ -105,13 +105,38 @@ impl Hotkey {
         })
     }
 
-    /// Whether the recorder should accept this combination. A bare letter
-    /// would be grabbed globally while Tasca runs, so require a modifier;
-    /// F13..F24 are dedicated macro keys and are fine on their own.
+    /// Why this combination must not be a global shortcut, or `None` when it
+    /// is fine. One rule for the recorder, `settings.ini` and registration:
+    /// every key except F13..F24 needs Ctrl, Alt or Win (Shift alone would grab
+    /// ordinary typing), and a few Windows/editing chords are never allowed.
+    pub fn unsafe_reason(&self) -> Option<String> {
+        if (0x7C..=0x87).contains(&self.vk) {
+            return None;
+        }
+        if !(self.ctrl || self.alt || self.win) {
+            return Some(NEED_MODIFIER.to_string());
+        }
+        let only_ctrl = self.ctrl && !(self.alt || self.shift || self.win);
+        let only_alt = self.alt && !(self.ctrl || self.shift || self.win);
+        // Alt+F4, Alt+Tab, Alt+Space; Ctrl+C, V, X, Z, A, S.
+        let reserved = (only_alt && matches!(self.vk, 0x73 | 0x09 | 0x20))
+            || (only_ctrl && matches!(self.vk, 0x43 | 0x56 | 0x58 | 0x5A | 0x41 | 0x53));
+        reserved.then(|| {
+            format!(
+                "{} is reserved by Windows or editing. Pick another.",
+                self.text()
+            )
+        })
+    }
+
     pub fn is_safe(&self) -> bool {
-        self.ctrl || self.alt || self.shift || self.win || (0x7C..=0x87).contains(&self.vk)
+        self.unsafe_reason().is_none()
     }
 }
+
+/// Shown by the recorder when no Ctrl, Alt or Win is held.
+pub const NEED_MODIFIER: &str =
+    "Hold Ctrl, Alt or Win too (Shift alone is not enough), or use F13\u{2013}F24.";
 
 /// Keys the recorder can name, and their `VK_*` values. Order matters only for
 /// lookup: the first name for a code wins.
@@ -228,6 +253,13 @@ pub fn display() -> (Option<Hotkey>, Option<String>) {
 
 /// Resident startup: register the saved shortcut.
 pub fn start(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
+    let desired = match desired {
+        Some(hk) if !hk.is_safe() => {
+            log(format!("hotkey: {} is unsafe, using the default", hk.text()));
+            Some(Hotkey::DEFAULT)
+        }
+        other => other,
+    };
     let result = match desired {
         Some(hk) => register(hwnd, hk),
         None => Ok(()),
@@ -259,6 +291,9 @@ pub fn start(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
 /// Settings OK: switch to `desired` now. On failure the previously registered
 /// shortcut is put back, so a taken combination never leaves Tasca with none.
 pub fn change(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
+    if let Some(reason) = desired.and_then(|hk| hk.unsafe_reason()) {
+        return Err(reason);
+    }
     if with(|s| s.active == desired && s.error.is_none()) {
         with(|s| s.shown = desired);
         return Ok(());
@@ -286,18 +321,29 @@ pub fn change(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
             }
         }
         Err(e) => {
-            if let Some(old) = old {
-                if register(hwnd, old).is_err() {
-                    log("hotkey: could not restore the previous shortcut");
+            // Put the previous shortcut back; if that fails too, nothing is
+            // registered and the tooltip must say so.
+            let restored = match old {
+                Some(old) => register(hwnd, old),
+                None => Ok(()),
+            };
+            match restored {
+                // The last good state (and a startup failure's message) as it
+                // was: the dialog shows this attempt's error.
+                Ok(()) => with(|s| {
+                    s.active = old;
+                    s.shown = old_shown;
+                    s.error = old_error;
+                }),
+                Err(re) => {
+                    log(format!("hotkey: could not restore the previous shortcut: {re}"));
+                    with(|s| {
+                        s.active = None;
+                        s.shown = old_shown;
+                        s.error = Some(re);
+                    });
                 }
             }
-            // Leave the last good state (and a startup failure's message)
-            // exactly as it was: the dialog shows this attempt's error.
-            with(|s| {
-                s.active = old;
-                s.shown = old_shown;
-                s.error = old_error;
-            });
             log(format!("hotkey change failed: {e}"));
         }
     }
@@ -399,11 +445,65 @@ mod tests {
     }
 
     #[test]
-    fn only_dedicated_keys_need_no_modifier() {
-        assert!(!Hotkey::parse("D").unwrap().is_safe());
-        assert!(Hotkey::parse("F13").unwrap().is_safe());
-        assert!(Hotkey::parse("Shift+D").unwrap().is_safe());
-        assert!(Hotkey::parse("Win+F").unwrap().is_safe());
+    fn safety_table() {
+        let safe = [
+            "F13",
+            "F24",
+            "Shift+F13",
+            "Ctrl+Alt+F24",
+            "Ctrl+Alt+D",
+            "Win+F",
+            "Win+Shift+D",
+            "Alt+D",
+            "Ctrl+D",
+            "Ctrl+Shift+C",
+            "Ctrl+Shift+V",
+            "Ctrl+Alt+C",
+            "Ctrl+Alt+S",
+            "Ctrl+Shift+Z",
+            "Alt+Shift+F4",
+            "Ctrl+Alt+F4",
+            "Alt+Shift+Tab",
+            "Ctrl+Alt+Space",
+            "Win+C",
+            "Ctrl+Backtick",
+        ];
+        for text in safe {
+            let hk = Hotkey::parse(text).unwrap();
+            assert!(hk.is_safe(), "{text} should be allowed");
+            assert_eq!(hk.unsafe_reason(), None);
+        }
+        let rejected = [
+            "D",
+            "F1",
+            "F12",
+            "Space",
+            "Shift+D",
+            "Shift+F1",
+            "Shift+Space",
+            "Alt+F4",
+            "Alt+Tab",
+            "Alt+Space",
+            "Ctrl+C",
+            "Ctrl+V",
+            "Ctrl+X",
+            "Ctrl+Z",
+            "Ctrl+A",
+            "Ctrl+S",
+        ];
+        for text in rejected {
+            let hk = Hotkey::parse(text).unwrap();
+            assert!(!hk.is_safe(), "{text} should be rejected");
+            assert!(hk.unsafe_reason().is_some(), "{text}");
+        }
+    }
+
+    #[test]
+    fn reasons_name_the_problem() {
+        let shift_d = Hotkey::parse("Shift+D").unwrap();
+        assert_eq!(shift_d.unsafe_reason().as_deref(), Some(NEED_MODIFIER));
+        let r = Hotkey::parse("Alt+F4").unwrap().unsafe_reason().unwrap();
+        assert!(r.starts_with("Alt+F4 is reserved"), "{r}");
     }
 
     #[test]

@@ -14,7 +14,9 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
-use crate::proto::{CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SHOW, WM_TOGGLE};
+use crate::proto::{
+    CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SETTINGS_SAVED, WM_SHOW, WM_TOGGLE,
+};
 use crate::{hotkey, park, settings, settings_win, shelf, tray};
 
 /// Caps+D while resident.
@@ -56,6 +58,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_PARK_DONE => {
                 park::on_done(hwnd);
+                LRESULT(0)
+            }
+            WM_SETTINGS_SAVED => {
+                settings_win::on_saved();
                 LRESULT(0)
             }
             WM_QUIT_RESIDENT => {
@@ -142,7 +148,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         }
         let _ = hotkey::start(hwnd, configured.shortcut);
         let (shortcut, shortcut_error) = hotkey::display();
-        tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref()));
+        tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref(), None));
         #[cfg(debug_assertions)]
         if std::env::var_os("TASCA_DEV_SETTINGS").is_some() {
             settings_win::open(hwnd);
