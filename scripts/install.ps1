@@ -1,19 +1,28 @@
 # Installs or updates Tasca for the current user. Rerun it to update.
-#   build -> quit the running resident -> copy -> Startup shortcut -> start hidden
+#   release -> quit the running resident -> copy -> Startup shortcut -> start hidden
+#   source  -> build -> quit the running resident -> copy -> Startup shortcut -> start hidden
+# A tasca.exe next to this script (an unzipped release) is installed as is, with no build.
 $ErrorActionPreference = 'Stop'
 
+$prebuilt = Join-Path $PSScriptRoot 'tasca.exe'
 $repo = Split-Path -Parent $PSScriptRoot
 $built = Join-Path $repo 'target\release\tasca.exe'
 $dir = Join-Path $env:LOCALAPPDATA 'Tasca'
 $exe = Join-Path $dir 'tasca.exe'
 $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Tasca.lnk'
 
-Write-Host 'Building (release)...'
-Push-Location $repo
-try {
-    cargo build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed (exit $LASTEXITCODE)" }
-} finally { Pop-Location }
+if (Test-Path -LiteralPath $prebuilt) {
+    Write-Host "Using the release build next to this script (no build)..."
+    $source = $prebuilt
+} else {
+    Write-Host 'Building (release)...'
+    Push-Location $repo
+    try {
+        cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed (exit $LASTEXITCODE)" }
+    } finally { Pop-Location }
+    $source = $built
+}
 
 # The spike registers the same window class, so it must go first (it has no quit verb).
 Get-Process -Name 'tasca-spike' -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -37,7 +46,7 @@ if ($running.Count -gt 0) {
 }
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Copy-Item -LiteralPath $built -Destination $exe -Force
+Copy-Item -LiteralPath $source -Destination $exe -Force
 Write-Host "Installed $exe"
 
 $sh = New-Object -ComObject WScript.Shell
