@@ -6,9 +6,10 @@ A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, dra
 
 ## What it does
 
-- **Summon it mid-drag.** Run `tasca.exe toggle` from a shortcut and a compact
-  list slides out of the left edge of the monitor under the pointer — even
-  while you are already dragging something.
+- **Summon it mid-drag.** Press **Ctrl+Alt+D** (Tasca's global shortcut, or
+  `tasca.exe toggle` from your own tool) and a compact list slides out of the
+  left edge of the monitor under the pointer — even while you are already
+  dragging something.
 - **Park files by dropping them on the Shelf.** Files and folders are kept by
   path. Browser images, links and text snippets are written to a temporary file
   first, so they can be dragged out like any other file. Several files dropped
@@ -19,13 +20,15 @@ A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, dra
   files again just moves that Item back to the top.
 - **Take them out into any app, folder or chat.** Tasca itself never moves,
   renames or deletes your files — the app you drop them on decides what happens.
-- **Nothing to manage.** One resident process per user, a few MB, no tray icon
-  and no settings. Thumbnails come from the shell, with tiles for images,
-  folders and file types as a fallback.
+- **Nothing to manage.** One resident process per user with a tray icon, a few
+  MB and no database. Settings are one small text file you can edit by hand.
+  Thumbnails come from the shell, with tiles for images, folders and file types
+  as a fallback.
 - **Materialized files are temporary.** Anything that was not a file to begin
   with lives in `%TEMP%\Tasca\<drop-id>\`, and drop folders older than 24 hours
-  are swept at startup. Your real files are never touched. The only other thing
-  Tasca writes is its debug log, `%LOCALAPPDATA%\Tasca\tasca.log`.
+  are swept at startup. Your real files are never touched. Tasca also keeps
+  `%LOCALAPPDATA%\Tasca\settings.ini` (your settings) and `tasca.log` (a debug
+  log); that is all it writes.
 
 Pure Rust on plain Win32/OLE: no webview, no Electron, no runtime to install.
 
@@ -79,11 +82,27 @@ On the Shelf: double-click opens an Item, drag it out to hand it to another app,
 click / Ctrl-click / Shift-click selects, the wheel scrolls a long list, and
 right-click offers **Remove**, **Clear all** and **Quit**.
 
-## Shortcut
+## Shortcut, tray and settings
 
-A built-in shortcut (default `Ctrl+Alt+D`), tray icon and settings window are
-coming in v0.1.0; meanwhile bind `tasca.exe toggle` in Hyperkey, AutoHotkey or
-PowerToys Keyboard Manager.
+Tasca lives in the notification area. Left-click the tray icon, or press the
+global shortcut (**Ctrl+Alt+D** by default), to show or hide the Shelf.
+Right-click the icon for **Show shelf**, **Settings…** and **Quit**.
+
+**Settings** lets you:
+
+- record a different global shortcut (Ctrl, Alt, Shift and Win are supported),
+  or clear it to **None**;
+- turn **Start with Windows** on or off — this creates or removes
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Tasca.lnk`, the same
+  shortcut `install.ps1` creates;
+- see the installed version.
+
+Settings are stored in `%LOCALAPPDATA%\Tasca\settings.ini` as plain
+`key=value` text, for example `shortcut=Ctrl+Alt+D`. Delete the file to return
+to the default. If another app already owns the combination, Tasca keeps
+running and says so in the tray tooltip and the Settings window; pick another
+combination or clear it. `tasca.exe toggle` still works, so Hyperkey,
+AutoHotkey or PowerToys users can bind it themselves.
 
 ## Build from source
 
