@@ -47,6 +47,8 @@ if ($running.Count -gt 0) {
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -LiteralPath $source -Destination $exe -Force
+# A downloaded exe carries Mark-of-the-Web; drop it from the installed copy.
+Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue
 Write-Host "Installed $exe"
 
 $sh = New-Object -ComObject WScript.Shell

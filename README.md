@@ -10,10 +10,9 @@ A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, dra
   list slides out of the left edge of the monitor under the pointer — even
   while you are already dragging something.
 - **Park files by dropping them on the Shelf.** Files and folders are kept by
-  path. Browser images and links, text snippets and Outlook attachments are
-  written to a temporary file first, so they can be dragged out like any other
-  file. Several files dropped together become one **Stack** and are taken out
-  as a unit.
+  path. Browser images, links and text snippets are written to a temporary file
+  first, so they can be dragged out like any other file. Several files dropped
+  together become one **Stack** and are taken out as a unit.
 - **Keep working.** The Shelf stays out of the way and does not take focus from
   the app you are working in (its right-click menu is the only exception); it
   hides when you toggle it away or take out the last Item. Parking the same
@@ -48,6 +47,12 @@ Rerun it to update; it quits a running Tasca first.
 Each release also attaches `tasca.exe` and `SHA256SUMS.txt` on its own, if you
 would rather place the exe yourself. Check a download with
 `Get-FileHash tasca.exe -Algorithm SHA256` and compare it to `SHA256SUMS.txt`.
+
+Tasca is not code-signed yet, so Windows SmartScreen may warn if you start a
+downloaded `tasca.exe` directly: choose **More info** → **Run anyway**.
+`install.ps1` removes that download mark from the copy it installs (with
+`Unblock-File`); for a standalone `tasca.exe`, run `Unblock-File .\tasca.exe`
+once yourself.
 
 Needs Windows 10 or 11, x64. No admin rights: the binary and the shortcut live
 in your own profile.

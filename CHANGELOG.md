@@ -15,10 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Park: drop files and folders on the Shelf; several files dropped together
   become one Stack, taken out as a unit. Parking an Item's files again moves it
   back to the top instead of duplicating it.
-- Content without a file of its own becomes a real file: browser images and
-  links, Outlook attachments and mail, and plain text are written to
-  `%TEMP%\Tasca\<drop-id>\`; drop folders older than 24 hours are swept at
-  startup.
+- Content without a file of its own becomes a real file: browser images, links
+  and plain text are written to `%TEMP%\Tasca\<drop-id>\`; drop folders older
+  than 24 hours are swept at startup.
 - Take out: drag Items into any app, folder or chat, with success detected from
   the drop effect, the logical performed effect or a moved source file. Tasca
   never moves, renames or deletes a file itself.
