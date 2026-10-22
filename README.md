@@ -28,11 +28,11 @@ A Yoink-style file shelf for Windows: drop files on the Shelf, keep working, dra
   with lives in `%TEMP%\Tasca\<drop-id>\`, and drop folders older than 24 hours
   are swept at startup. Your real files are never touched. Tasca also keeps
   `%LOCALAPPDATA%\Tasca\settings.ini` (your settings) and `tasca.log` (a debug
-  log); that is all it writes.
+  log, with the previous run kept as `tasca.log.1`); that is all it writes.
 
 Pure Rust on plain Win32/OLE: no webview, no Electron, no runtime to install.
 
-![The Shelf with a Stack of two PowerShell files (setup.ps1 +1) and CLAUDE.md](docs/images/shelf.png)
+![The Shelf with a Stack of two files (setup.ps1 +1) and CLAUDE.md](docs/images/shelf.png)
 
 ## Download & install
 
@@ -92,8 +92,10 @@ Right-click the icon for **Show shelf**, **Settings…** and **Quit**.
 
 **Settings** lets you:
 
-- record a different global shortcut (Ctrl, Alt, Shift and Win are supported),
-  or clear it to **None**;
+- record a different global shortcut, or clear it to **None**. The recorder
+  accepts any combination that includes Ctrl, Alt or Win (Shift alone is not
+  enough), or an F13–F24 key on its own; Alt+F4, Alt+Tab, Alt+Space and
+  Ctrl+C/V/X/Z/A/S are refused;
 - turn **Start with Windows** on or off — this creates or removes
   `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Tasca.lnk`, the same
   shortcut `install.ps1` creates;
@@ -103,8 +105,11 @@ Settings are stored in `%LOCALAPPDATA%\Tasca\settings.ini` as plain
 `key=value` text, for example `shortcut=Ctrl+Alt+D`. Delete the file to return
 to the default. If another app already owns the combination, Tasca keeps
 running and says so in the tray tooltip and the Settings window; pick another
-combination or clear it. `tasca.exe toggle` still works, so Hyperkey,
-AutoHotkey or PowerToys users can bind it themselves.
+combination or clear it. A `shortcut=` line in that file that is unsafe by the
+rule above, or cannot be read, falls back to the default. If saving your
+settings or **Start with Windows** fails, Tasca keeps running and says so in the
+tray tooltip. `tasca.exe toggle` still works, so Hyperkey, AutoHotkey or
+PowerToys users can bind it themselves.
 
 ## Build from source
 
