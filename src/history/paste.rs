@@ -10,7 +10,6 @@
 //! timer, a bounded number of times.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
@@ -109,11 +108,43 @@ thread_local! {
     static PENDING: Cell<Option<isize>> = const { Cell::new(None) };
 }
 
-/// The newest paste's serial: a worker whose paste was replaced publishes nothing.
-static CURRENT: AtomicU64 = AtomicU64::new(0);
+/// The paste counter and the DIB a worker made, behind one lock: the worker's
+/// "is my paste still the newest" check and its publish cannot be split by a
+/// newer paste starting in between.
+#[derive(Default)]
+struct Prep {
+    current: u64,
+    /// (serial of the paste, DIB bytes; empty = it failed).
+    result: Option<(u64, Vec<u8>)>,
+}
 
-/// The DIB a worker made: (serial of the paste, bytes; empty = it failed).
-static PREPARED: Mutex<Option<(u64, Vec<u8>)>> = Mutex::new(None);
+impl Prep {
+    /// A new paste starts: older workers' results are void.
+    fn begin(&mut self) -> u64 {
+        self.current += 1;
+        self.result = None;
+        self.current
+    }
+
+    /// A worker's result; `false` (and nothing stored) when its paste was replaced.
+    fn publish(&mut self, serial: u64, dib: Vec<u8>) -> bool {
+        let newest = self.current == serial;
+        if newest {
+            self.result = Some((serial, dib));
+        }
+        newest
+    }
+
+    fn take(&mut self) -> Option<(u64, Vec<u8>)> {
+        self.result.take()
+    }
+}
+
+static PREP: Mutex<Prep> = Mutex::new(Prep { current: 0, result: None });
+
+fn prep<R>(f: impl FnOnce(&mut Prep) -> R) -> R {
+    f(&mut PREP.lock().unwrap_or_else(|e| e.into_inner()))
+}
 
 enum Written {
     /// Sequence number of this write, taken while the clipboard was still ours.
@@ -174,7 +205,7 @@ pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target, plain: bo
 }
 
 fn start(resident: HWND, owner: HWND, clip: &Clip, target: Option<Target>, plain: bool) {
-    let serial = CURRENT.fetch_add(1, Ordering::SeqCst) + 1;
+    let serial = prep(Prep::begin);
     let image = matches!(clip.content, Content::Image { .. });
     let job = Job { items: plan(clip, plain, None), target, tries: 0, owner: owner.0 as isize, waiting: image, serial };
     // A newer paste replaces one still waiting.
@@ -192,23 +223,22 @@ fn make_dib(resident: HWND, png: Arc<Vec<u8>>, serial: u64) {
     let raw = resident.0 as isize;
     let spawned = std::thread::Builder::new().name("history-dib".into()).spawn(move || {
         let dib = image::decode_png(&png).ok().map(|b| image::bitmap_to_dib(&b)).unwrap_or_default();
-        if CURRENT.load(Ordering::SeqCst) != serial {
+        if !prep(|p| p.publish(serial, dib)) {
             return;
         }
-        *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = Some((serial, dib));
         unsafe {
             let _ = PostMessageW(Some(HWND(raw as *mut _)), WM_HISTORY_PASTE_READY, WPARAM(0), LPARAM(0));
         }
     });
     if spawned.is_err() {
-        *PREPARED.lock().unwrap_or_else(|e| e.into_inner()) = Some((serial, Vec::new()));
+        prep(|p| p.publish(serial, Vec::new()));
         on_prepared(resident);
     }
 }
 
 /// `WM_HISTORY_PASTE_READY`: the DIB is made; write the Clip.
 pub fn on_prepared(resident: HWND) {
-    let Some((serial, dib)) = PREPARED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let Some((serial, dib)) = prep(Prep::take) else { return };
     let ready = JOB.with(|j| match j.borrow_mut().as_mut() {
         Some(job) if job.serial == serial && job.waiting => {
             job.waiting = false;
@@ -343,6 +373,48 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
 mod tests {
     use super::*;
     use super::super::clip::ClipId;
+
+    #[test]
+    fn a_stale_worker_never_overwrites_a_newer_paste() {
+        let mut p = Prep::default();
+        let a = p.begin();
+        let b = p.begin();
+        // B finishes first, then the slow A tries to publish.
+        assert!(p.publish(b, vec![2]));
+        assert!(!p.publish(a, vec![1]));
+        assert_eq!(p.take(), Some((b, vec![2])));
+        assert_eq!(p.take(), None);
+    }
+
+    #[test]
+    fn a_new_paste_voids_a_result_nobody_took_yet() {
+        let mut p = Prep::default();
+        let a = p.begin();
+        assert!(p.publish(a, vec![1]));
+        let b = p.begin();
+        assert_eq!(p.take(), None);
+        assert!(!p.publish(a, vec![1]));
+        assert!(p.publish(b, vec![2]));
+        assert_eq!(p.take(), Some((b, vec![2])));
+    }
+
+    #[test]
+    fn workers_racing_a_new_paste_leave_the_newest_result() {
+        let p = std::sync::Arc::new(Mutex::new(Prep::default()));
+        let old = p.lock().unwrap().begin();
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let p = std::sync::Arc::clone(&p);
+                std::thread::spawn(move || p.lock().unwrap().publish(old, vec![1]))
+            })
+            .collect();
+        let newest = p.lock().unwrap().begin();
+        assert!(p.lock().unwrap().publish(newest, vec![2]));
+        for r in racers {
+            let _ = r.join();
+        }
+        assert_eq!(p.lock().unwrap().take(), Some((newest, vec![2])));
+    }
 
     fn text_clip(html: Option<&str>, rtf: Option<&str>) -> Clip {
         Clip {

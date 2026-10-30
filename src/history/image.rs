@@ -80,9 +80,6 @@ const BI_BITFIELDS: u32 = 3;
 /// a truncated block).
 pub fn dib_to_bitmap(dib: &[u8]) -> Option<Bitmap> {
     let header = u32_at(dib, 0)? as usize;
-    if header < 40 {
-        return None; // BITMAPCOREHEADER: not worth supporting
-    }
     let width = i32_at(dib, 4)?;
     let raw_h = i32_at(dib, 8)?;
     let bits = u16_at(dib, 14)? as u32;
@@ -106,19 +103,22 @@ pub fn dib_to_bitmap(dib: &[u8]) -> Option<Bitmap> {
         return None;
     }
 
-    // Masks: inside V4/V5 headers; after a 40-byte header only with BI_BITFIELDS.
+    // The header sizes that exist: 40 (INFO), 52 (V2), 56 (V3), 108 (V4), 124 (V5);
+    // anything else (OS/2 core, 64-byte OS/2 2.x) is refused. With BI_BITFIELDS the
+    // RGB masks follow a 40-byte header, or sit in the header from V2 on (alpha
+    // from V3 on). BI_RGB uses the default layout.
     let mut at = header;
-    let masks = if header >= 56 {
-        Some([u32_at(dib, 40)?, u32_at(dib, 44)?, u32_at(dib, 48)?, u32_at(dib, 52)?])
-    } else if compression == BI_BITFIELDS {
-        let m = [u32_at(dib, at)?, u32_at(dib, at + 4)?, u32_at(dib, at + 8)?, 0];
-        at += 12;
-        Some(m)
-    } else {
-        None
+    let masks = match (header, compression) {
+        (40, BI_BITFIELDS) => {
+            let m = [u32_at(dib, at)?, u32_at(dib, at + 4)?, u32_at(dib, at + 8)?, 0];
+            at += 12;
+            Some(m)
+        }
+        (52, BI_BITFIELDS) => Some([u32_at(dib, 40)?, u32_at(dib, 44)?, u32_at(dib, 48)?, 0]),
+        (56 | 108 | 124, BI_BITFIELDS) => Some([u32_at(dib, 40)?, u32_at(dib, 44)?, u32_at(dib, 48)?, u32_at(dib, 52)?]),
+        (40 | 52 | 56 | 108 | 124, _) => None,
+        _ => return None,
     };
-    // V4/V5 masks only apply with BI_BITFIELDS; BI_RGB uses the default layout.
-    let masks = if compression == BI_BITFIELDS { masks } else { None };
 
     let palette_len = if bits <= 8 {
         if colors_used == 0 { 1usize << bits } else { colors_used.min(1usize << bits) }
@@ -173,8 +173,10 @@ pub fn dib_to_bitmap(dib: &[u8]) -> Option<Bitmap> {
             dst[x * 4..x * 4 + 4].copy_from_slice(&out);
         }
     }
-    // A 32-bit bitmap that never set its alpha byte is opaque.
-    if bits == 32 && bgra.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+    // A 32-bit bitmap that never set its alpha byte is opaque. Not when the
+    // header names an alpha mask: then the alpha is meant.
+    let explicit_alpha = masks.is_some_and(|m| m[3] != 0);
+    if bits == 32 && !explicit_alpha && bgra.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
         bgra.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
     }
     Some(Bitmap { width, height, bgra })
@@ -394,8 +396,13 @@ mod tests {
         let px = [10, 20, 30, 0, 40, 50, 60, 0];
         let plain = dib_to_bitmap(&dib40(2, -1, 32, BI_RGB, 0, &[], &px)).unwrap();
         assert_eq!(plain.bgra, [10, 20, 30, 255, 40, 50, 60, 255]);
+        // a V5 header that names an alpha mask means it: all-zero alpha is transparent
         let v5 = dib_to_bitmap(&dib_v5(2, -1, BGRA_MASKS, &px)).unwrap();
-        assert_eq!(v5.bgra, plain.bgra);
+        assert_eq!(v5.bgra, [10, 20, 30, 0, 40, 50, 60, 0]);
+        // but with the default layout (BI_RGB) it is the unused byte
+        let mut rgb = dib_v5(2, -1, BGRA_MASKS, &px);
+        rgb[16..20].copy_from_slice(&BI_RGB.to_le_bytes());
+        assert_eq!(dib_to_bitmap(&rgb).unwrap().bgra, plain.bgra);
         // 32 bits with the masks but no alpha mask is opaque too
         let no_alpha = dib_to_bitmap(&dib40(2, -1, 32, BI_BITFIELDS, 0, &masks_bytes([BGRA_MASKS[0], BGRA_MASKS[1], BGRA_MASKS[2], 0]), &[10, 20, 30, 77, 40, 50, 60, 77])).unwrap();
         assert_eq!(no_alpha.bgra, [10, 20, 30, 255, 40, 50, 60, 255]);
@@ -425,6 +432,40 @@ mod tests {
         assert_eq!(&b.bgra[..4], &[0, 0, 255, 255]);
         assert_eq!(&b.bgra[4..8], &[0, 0, 0, 255]);
         assert_eq!(&b.bgra[8..12], &[0, 0, 255, 255]);
+    }
+
+    /// A header of `size` bytes (52 = V2, 56 = V3, 108 = V4) with BI_BITFIELDS and `masks` in it.
+    fn dib_sized(size: u32, masks: [u32; 4], pixels: &[u8]) -> Vec<u8> {
+        let mut d = dib40(1, -1, 32, BI_BITFIELDS, 0, &[], &[]);
+        d[0..4].copy_from_slice(&size.to_le_bytes());
+        for m in masks {
+            d.extend_from_slice(&m.to_le_bytes());
+        }
+        d.resize(size as usize, 0);
+        d.extend_from_slice(pixels);
+        d
+    }
+
+    #[test]
+    fn the_52_byte_v2_header_holds_its_masks_and_has_no_alpha() {
+        // RGBA byte order masks inside the header; the pixels start right after it.
+        let masks = [0x0000_00FF, 0x0000_FF00, 0x00FF_0000, 0xFF00_0000];
+        let b = dib_to_bitmap(&dib_sized(52, masks, &[1, 2, 3, 4])).unwrap();
+        // the 4th mask is not part of a V2 header: opaque
+        assert_eq!(b.bgra, [3, 2, 1, 255]);
+        let v3 = dib_to_bitmap(&dib_sized(56, masks, &[1, 2, 3, 4])).unwrap();
+        assert_eq!(v3.bgra, [3, 2, 1, 4]);
+        let v4 = dib_to_bitmap(&dib_sized(108, masks, &[1, 2, 3, 4])).unwrap();
+        assert_eq!(v4.bgra, [3, 2, 1, 4]);
+    }
+
+    #[test]
+    fn other_header_sizes_are_refused() {
+        for size in [12u32, 16, 41, 64, 100, 125] {
+            let mut d = dib_sized(40, BGRA_MASKS, &[1, 2, 3, 4]);
+            d[0..4].copy_from_slice(&size.to_le_bytes());
+            assert!(dib_to_bitmap(&d).is_none(), "{size}");
+        }
     }
 
     #[test]

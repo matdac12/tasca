@@ -157,10 +157,22 @@ pub fn decode_hdrop(data: &[u8]) -> Vec<String> {
             if p.is_empty() {
                 break;
             }
-            out.push(String::from_utf8_lossy(p).into_owned());
+            out.push(ansi_to_string(p));
         }
     }
     out
+}
+
+/// Bytes in the system ANSI code page (what a non-wide `DROPFILES` holds) as text.
+fn ansi_to_string(bytes: &[u8]) -> String {
+    use windows::Win32::Globalization::{MultiByteToWideChar, CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+    let len = unsafe { MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, None) };
+    if len <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut wide = vec![0u16; len as usize];
+    let done = unsafe { MultiByteToWideChar(CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0), bytes, Some(&mut wide)) };
+    String::from_utf16_lossy(&wide[..done.max(0) as usize])
 }
 
 /// A wide `CF_HDROP` block for these paths.
@@ -319,6 +331,19 @@ mod tests {
         let paths = vec!["C:\\Users\\Mattia\\Documenti\\Relazione è.docx".to_string(), "D:\\x y\\".to_string()];
         assert_eq!(decode_hdrop(&encode_hdrop(&paths)), paths);
         assert!(decode_hdrop(&encode_hdrop(&[])).is_empty());
+    }
+
+    #[test]
+    fn an_ansi_hdrop_is_read_in_the_system_code_page_not_as_utf8() {
+        use windows::Win32::Globalization::GetACP;
+        // 0xE9 is "é" in Windows-1252 and invalid as UTF-8; only checkable where that is the ANSI page.
+        if unsafe { GetACP() } != 1252 {
+            return;
+        }
+        let mut ansi = vec![0u8; DROPFILES_SIZE];
+        ansi[0] = DROPFILES_SIZE as u8;
+        ansi.extend_from_slice(b"C:\\caff\xE9.txt\0\0");
+        assert_eq!(decode_hdrop(&ansi), ["C:\\caff\u{e9}.txt"]);
     }
 
     #[test]

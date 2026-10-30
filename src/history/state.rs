@@ -27,6 +27,8 @@ pub struct Capture {
     pub image: Option<CapturedImage>,
     /// The `CF_HDROP` paths.
     pub files: Option<Vec<String>>,
+    /// A format the copy offered was too big to read at all: skip the whole copy.
+    pub oversized: bool,
     /// The clipboard's owner was the History window: one of our own writes.
     /// The sequence number alone is not enough (the update can report a later
     /// number than the one taken at write time).
@@ -277,6 +279,9 @@ impl Machine {
         self.last_seq = Some(capture.seq);
         if capture.own || self.own_seq == Some(capture.seq) {
             return vec![Effect::Skip(Skip::OwnWrite)];
+        }
+        if capture.oversized {
+            return vec![Effect::Skip(Skip::TooBig)];
         }
         let Some((text, content)) = capture.into_parts() else {
             return vec![Effect::Skip(Skip::NothingRecordable)];
@@ -1377,6 +1382,14 @@ mod tests {
         assert_eq!(m.go(Event::Copied(Capture { html: Some("<b>".into()), ..cap(1) })), [Effect::Skip(Skip::NothingRecordable)]);
         assert_eq!(m.go(Event::Copied(Capture { text: Some(" ".into()), ..cap(2) })), [Effect::Skip(Skip::NothingRecordable)]);
         assert_eq!(m.go(Event::Copied(Capture { files: Some(vec![]), ..cap(3) })), [Effect::Skip(Skip::NothingRecordable)]);
+    }
+
+    #[test]
+    fn a_copy_with_a_format_too_big_to_read_is_skipped_whole() {
+        let mut m = Machine::default();
+        let c = Capture { text: Some("short".into()), oversized: true, ..cap(1) };
+        assert_eq!(m.go(Event::Copied(c)), [Effect::Skip(Skip::TooBig)]);
+        assert!(m.clips().is_empty());
     }
 
     #[test]

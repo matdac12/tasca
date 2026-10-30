@@ -299,6 +299,8 @@ struct Raw {
     rtf: Option<Vec<u8>>,
     hdrop: Option<Vec<u8>>,
     dib: Option<Vec<u8>>,
+    /// A format was over its read limit.
+    oversized: bool,
 }
 
 fn available(format: u32) -> bool {
@@ -336,24 +338,24 @@ fn copy_out() -> Raw {
     };
     // Only the formats the chosen kind keeps are read.
     match formats::choose_kind(&offered) {
-        Some(Kind::Files) => raw.hdrop = global_bytes(CF_HDROP.0 as u32, MAX_BYTES),
+        Some(Kind::Files) => raw.read(CF_HDROP.0 as u32, MAX_BYTES, |r| &mut r.hdrop),
         Some(Kind::Text { html, rtf }) => {
-            raw.text = unicode_text();
+            raw.text = unicode_text(&mut raw.oversized);
             // Blank text is not a text Clip (the machine drops it): an image offered with it is read.
             if raw.text.as_deref().is_none_or(|t| t.trim().is_empty()) && (offered.dibv5 || offered.dib) {
                 let format = if offered.dibv5 { CF_DIBV5.0 } else { CF_DIB.0 } as u32;
-                raw.dib = global_bytes(format, MAX_DIB_BYTES);
+                raw.read(format, MAX_DIB_BYTES, |r| &mut r.dib);
             }
             if html {
-                raw.html = global_bytes(f.html, MAX_BYTES);
+                raw.read(f.html, MAX_BYTES, |r| &mut r.html);
             }
             if rtf {
-                raw.rtf = global_bytes(f.rtf, MAX_BYTES);
+                raw.read(f.rtf, MAX_BYTES, |r| &mut r.rtf);
             }
         }
         Some(Kind::Image { v5 }) => {
             let format = if v5 { CF_DIBV5.0 } else { CF_DIB.0 } as u32;
-            raw.dib = global_bytes(format, MAX_DIB_BYTES);
+            raw.read(format, MAX_DIB_BYTES, |r| &mut r.dib);
         }
         None => {}
     }
@@ -378,6 +380,7 @@ fn capture(raw: Raw) -> Capture {
         rtf: raw.rtf.map(|b| text_of(&b)),
         image,
         files: raw.hdrop.map(|b| formats::decode_hdrop(&b)),
+        oversized: raw.oversized,
     }
 }
 
@@ -405,29 +408,48 @@ pub(super) fn content_formats() -> &'static ContentFormats {
     })
 }
 
-/// The bytes of a global-memory format, up to `limit` (more: not read). The
-/// clipboard owns the handle: copy, never free.
-fn global_bytes(format: u32, limit: usize) -> Option<Vec<u8>> {
+/// A global-memory format read: its bytes, or too big to read.
+enum Got {
+    Bytes(Vec<u8>),
+    TooBig,
+    /// Could not be read (no data, lock failed).
+    Unreadable,
+}
+
+/// The bytes of a global-memory format, up to `limit`. The clipboard owns the
+/// handle: copy, never free.
+fn global_bytes(format: u32, limit: usize) -> Got {
     unsafe {
-        let handle = GetClipboardData(format).ok()?;
+        let Ok(handle) = GetClipboardData(format) else { return Got::Unreadable };
         let h = HGLOBAL(handle.0);
         let size = GlobalSize(h);
         if size > limit {
             log(format!("history: format {format} is {size} bytes, not read"));
-            return None;
+            return Got::TooBig;
         }
         let p = GlobalLock(h) as *const u8;
         if p.is_null() {
-            return None;
+            return Got::Unreadable;
         }
         let bytes = std::slice::from_raw_parts(p, size).to_vec();
         let _ = GlobalUnlock(h);
-        Some(bytes)
+        Got::Bytes(bytes)
+    }
+}
+
+impl Raw {
+    /// Read `format` into `slot`; a format over the limit marks the whole copy oversized.
+    fn read(&mut self, format: u32, limit: usize, slot: fn(&mut Raw) -> &mut Option<Vec<u8>>) {
+        match global_bytes(format, limit) {
+            Got::Bytes(b) => *slot(self) = Some(b),
+            Got::TooBig => self.oversized = true,
+            Got::Unreadable => {}
+        }
     }
 }
 
 /// `CF_UNICODETEXT` as a string. The clipboard owns the handle: copy, never free.
-fn unicode_text() -> Option<String> {
+fn unicode_text(oversized: &mut bool) -> Option<String> {
     unsafe {
         let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
         let h = HGLOBAL(handle.0);
@@ -440,6 +462,7 @@ fn unicode_text() -> Option<String> {
         if bytes / 2 > MAX_UNITS {
             let _ = GlobalUnlock(h);
             log("history: text too big, not read");
+            *oversized = true;
             return None;
         }
         let units = std::slice::from_raw_parts(p, bytes / 2);
