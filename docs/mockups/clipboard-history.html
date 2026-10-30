@@ -1,0 +1,302 @@
+<!doctype html>
+<!-- Tasca clipboard History mockups (2026-10-30). Four placements and layouts
+     for the Alt+V History panel, in the Shelf's look (shelf-layouts.html: dark
+     glass, hairline, Segoe UI). Each variant shows the whole screen first
+     (1280 x 720 DIP: a 1920 x 1080 laptop at 150 %, scaled down to fit), then
+     the panel at true size, live: type to search, Up/Down, Enter or click
+     pastes, Shift = plain text, Alt/Ctrl+1..9, Ctrl+P pin, Ctrl+Delete delete,
+     Esc, right-click menu. Nothing touches a real clipboard.
+     Mattia picked A (at the cursor); B, C and D were not picked. Round 2,
+     with A refined, is clipboard-history-a.html. -->
+<html><head><meta charset="utf-8"><title>Tasca clipboard history mockups</title><style>
+:root{--glass:rgba(18,18,20,.92);--hair:0 0 0 .5px rgba(255,255,255,.14);--t1:rgba(255,255,255,.88);--t2:rgba(255,255,255,.56);--t3:rgba(255,255,255,.34);--acc:#4cc2ff;--f:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+body{font-family:var(--f)}
+body.page{background:#131316;color:#ececf1;margin:0;padding:24px;max-width:760px}
+.intro{font-size:12.5px;line-height:1.5;color:var(--muted-foreground,#a4a4b0);margin:0 0 18px}
+.intro kbd,.v p kbd{font:600 11px var(--f);padding:0 4px;border-radius:4px;border:1px solid var(--border,#3a3a42)}
+.v{margin:0 0 34px}
+.v h3{margin:0 0 3px;font-size:15px;font-weight:600}
+.v p{margin:0 0 10px;font-size:12.5px;line-height:1.5;color:var(--muted-foreground,#a4a4b0)}
+.v .cap{font-size:11px;color:var(--muted-foreground,#a4a4b0);margin:10px 0 6px}
+.scene{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:10px}
+.screen{position:absolute;left:0;top:0;width:1280px;height:720px;transform-origin:0 0;
+ background:radial-gradient(120% 90% at 80% 10%,#3a4a63 0%,#1d2533 55%,#141821 100%)}
+.screen .copy{position:absolute;pointer-events:none}
+.tb{position:absolute;left:0;right:0;bottom:0;height:48px;background:rgba(28,30,36,.88);display:flex;justify-content:center;align-items:center;gap:10px}
+.tb i{width:26px;height:26px;border-radius:6px;background:rgba(255,255,255,.16)}
+.tb i.on{background:#2f7fd8}
+.win{position:absolute;left:250px;top:64px;width:780px;height:520px;border-radius:8px;background:#f3f3f5;box-shadow:0 8px 30px rgba(0,0,0,.45);color:#222;font:13px var(--f);overflow:hidden}
+.win .tt{height:32px;border-bottom:1px solid #e1e1e6;display:flex;align-items:center;padding:0 12px;font-size:12px;color:#555;gap:8px}
+.win .tt b{width:12px;height:12px;border-radius:3px;background:#2f7fd8}
+.win .fld{padding:9px 16px;border-bottom:1px solid #e8e8ec;color:#666}
+.win .fld span{color:#222}
+.win .body{padding:16px;line-height:1.6}
+.win .caret{display:inline-block;width:1px;height:15px;background:#222;vertical-align:-2px}
+.win i.l{display:block;height:7px;border-radius:4px;background:#dedee4;margin:12px 0}
+.cursor{position:absolute;width:0;height:0;border-left:8px solid #fff;border-top:6px solid transparent;border-bottom:6px solid transparent;transform:rotate(-125deg);filter:drop-shadow(0 1px 1px #000)}
+
+/* shared panel parts */
+.pn{background:var(--glass);box-shadow:var(--hair),0 6px 18px rgba(0,0,0,.35);color:var(--t1);border-radius:12px;font-family:var(--f);box-sizing:border-box;position:relative;text-align:left}
+.srch{display:flex;align-items:center;gap:8px}
+.srch input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--t1);font:inherit;padding:0}
+.srch input::placeholder{color:var(--t3)}
+.srch .lens{color:var(--t3)}
+.list{overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
+.row{display:flex;align-items:center;border-radius:7px;cursor:default}
+.row:hover{background:rgba(255,255,255,.08)}
+.row.sel{background:rgba(255,255,255,.14)}
+.row.flash{background:rgba(76,194,255,.30)}
+.meta{min-width:0;flex:1}
+.nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub svg{vertical-align:-1px;margin-right:3px;color:var(--t2)}
+.sect{color:var(--t3);font-size:10.5px;padding:7px 8px 3px}
+.tile{flex:none;display:grid;place-items:center;border-radius:6px;background:#2a2a30;color:var(--t2);font-weight:700;position:relative}
+.tile.fmt{color:#8ab4ff}.tile.url{color:var(--acc)}.tile.pdf{color:#ff6b76}
+.badge{position:absolute;right:-5px;top:-5px;min-width:15px;height:15px;padding:0 3px;box-sizing:border-box;border-radius:8px;background:#fff;color:#121214;font:700 9px/15px var(--f);text-align:center}
+.key{flex:none;color:var(--t3);font-size:10.5px;border:.5px solid rgba(255,255,255,.2);border-radius:4px;padding:0 5px;line-height:16px}
+.empty{color:var(--t3);text-align:center;padding:18px 0;font-size:12px}
+.foot{display:flex;justify-content:space-between;align-items:center;color:var(--t2);font-size:11px}
+.foot a{color:var(--t2);text-decoration:none;cursor:default}.foot a:hover{color:var(--t1)}
+.live{display:flex;justify-content:center}
+.toast{min-height:18px;margin-top:8px;font-size:11.5px;color:var(--acc);text-align:center}
+
+/* A: at the cursor */
+.pA{width:380px;padding:6px}
+.pA .srch{height:34px;padding:0 8px;font-size:13px;border-bottom:.5px solid rgba(255,255,255,.12);margin-bottom:4px}
+.pA .list{max-height:404px}
+.pA .row{gap:10px;padding:6px 8px;height:44px;box-sizing:border-box}
+.pA .tile{width:28px;height:28px;font-size:11px}
+.pA .nm{font-size:12.5px;line-height:16px}.pA .sub{font-size:10.5px}
+.pA .foot{height:28px;padding:0 8px;border-top:.5px solid rgba(255,255,255,.12);margin-top:4px}
+
+/* B: centre palette */
+.pB{width:620px;padding:8px;border-radius:14px}
+.pB .srch{height:50px;padding:0 12px;font-size:17px;border-bottom:.5px solid rgba(255,255,255,.12);margin-bottom:6px}
+.pB .srch .lens{font-size:18px}
+.pB .list{max-height:420px}
+.pB .row{gap:12px;padding:7px 12px;height:50px;box-sizing:border-box}
+.pB .tile{width:34px;height:34px;font-size:12px;border-radius:7px}
+.pB .nm{font-size:13.5px;line-height:18px}.pB .sub{font-size:11px}
+.pB .key{font-size:11px}
+.pB .sect{padding:8px 12px 4px}
+.pB .foot{height:34px;padding:0 12px;border-top:.5px solid rgba(255,255,255,.12);margin-top:6px}
+.pB .hints span{margin-left:14px}.pB .hints b{font-weight:600;color:var(--t1);margin-right:4px}
+
+/* C: bottom strip */
+.pC{width:100%;padding:10px 12px 12px;border-radius:14px}
+.pC .top{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+.pC .srch{width:300px;height:30px;padding:0 10px;border-radius:15px;background:rgba(255,255,255,.07);font-size:12.5px}
+.pC .top .sp{flex:1}
+.pC .top .n{font-size:11px;color:var(--t2)}
+.pC .cards{display:flex;gap:10px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
+.card{flex:none;width:184px;height:172px;border-radius:10px;background:rgba(255,255,255,.06);display:flex;flex-direction:column;overflow:hidden;cursor:default;box-sizing:border-box}
+.card:hover{background:rgba(255,255,255,.10)}
+.card.sel{box-shadow:0 0 0 1.5px var(--acc);background:rgba(255,255,255,.10)}
+.card.flash{background:rgba(76,194,255,.30)}
+.card .ch{display:flex;align-items:center;gap:6px;padding:8px 9px 6px;font-size:10.5px;color:var(--t2)}
+.card .ch .tile{width:18px;height:18px;font-size:8px;border-radius:4px}
+.card .ch .sp{flex:1}
+.card .cb{flex:1;margin:0 9px;font-size:12px;line-height:16px;color:var(--t1);overflow:hidden;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;word-break:break-word}
+.card .cb.img{margin:0;border-radius:0;display:block}
+.card .cf{padding:6px 9px 8px;font-size:10px;color:var(--t3)}
+
+/* D: left edge, the Shelf's sibling */
+.pD{width:300px;padding:8px}
+.pD .hd{display:flex;justify-content:space-between;padding:1px 4px 7px;font-size:11px;color:var(--t2)}
+.pD .hd a{color:var(--t2);text-decoration:none;cursor:default}
+.pD .srch{height:28px;padding:0 8px;border-radius:7px;background:rgba(255,255,255,.07);font-size:12px;margin-bottom:6px}
+.pD .list{max-height:403px}
+.pD .row{gap:9px;padding:5px 4px;height:40px;box-sizing:border-box}
+.pD .tile{width:30px;height:30px;font-size:10px}
+.pD .nm{font-size:12px;line-height:15px}.pD .sub{font-size:10.5px}
+.pD .key{border:0;padding:0 2px}
+.pD .sect{padding:6px 4px 2px}
+
+/* the native right-click menu (Windows 11, dark) */
+.menu{position:fixed;z-index:9;min-width:190px;padding:4px;border-radius:8px;background:#2c2c2c;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 8px 24px rgba(0,0,0,.45);font:12px var(--f);color:#fff}
+.menu div{padding:7px 12px;border-radius:4px;cursor:default}
+.menu div:hover{background:rgba(255,255,255,.08)}
+.menu hr{border:0;border-top:1px solid rgba(255,255,255,.1);margin:4px 0}
+.reset{display:block;margin:-18px auto 0;font:11px var(--f);color:var(--muted-foreground,#a4a4b0);background:none;border:1px solid var(--border,#3a3a42);border-radius:6px;padding:4px 10px;cursor:pointer}
+</style></head><body class="page">
+
+<p class="intro">Each variant: the whole screen first (where it opens, shrunk), then the panel at true size. The panels are live: click into the search, then type, <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Enter</kbd> or click to paste (<kbd>Shift</kbd> = plain text), <kbd>Alt</kbd>/<kbd>Ctrl</kbd>+<kbd>1</kbd>…<kbd>9</kbd>, <kbd>Ctrl</kbd>+<kbd>P</kbd> pin, <kbd>Ctrl</kbd>+<kbd>Del</kbd> delete, <kbd>Esc</kbd>, right-click a row.</p>
+
+<section class="v" data-v="A">
+ <h3>A · At the cursor</h3>
+ <p>Like ClipClip's paste menu and Maccy: opens at the mouse pointer, moved to stay on screen. 380 wide, about nine rows, one-line text plus a type line. Closest to your habit, but the mouse is often nowhere near where you are typing.</p>
+ <div class="scene"><div class="screen"></div></div>
+ <div class="cap">True size</div><div class="live"></div><div class="toast"></div>
+</section>
+
+<section class="v" data-v="B">
+ <h3>B · Centre palette</h3>
+ <p>Like Raycast or PowerToys Run: big and centred in the top third of the monitor the mouse is on. Large search, taller rows, <kbd>Alt 1</kbd> hints and the keys in the footer. Always in the same place and easy to read; the furthest from ClipClip.</p>
+ <div class="scene"><div class="screen"></div></div>
+ <div class="cap">True size</div><div class="live"></div><div class="toast"></div>
+</section>
+
+<section class="v" data-v="C">
+ <h3>C · Bottom strip</h3>
+ <p>Like Paste on the Mac: cards along the bottom of the screen with big text excerpts and real image previews. Only six or seven Clips show at once, and <kbd>←</kbd> <kbd>→</kbd> have to move the selection, which fights the search caret.</p>
+ <div class="scene"><div class="screen"></div></div>
+ <div class="cap">True size (scroll sideways)</div><div class="live"></div><div class="toast"></div>
+</section>
+
+<section class="v" data-v="D">
+ <h3>D · Left edge, the Shelf's sibling</h3>
+ <p>Same place and look as the Shelf, a little wider, with a search line under the header. Tasca feels like one app; but it opens away from where you type, and it shares the left edge with the Shelf.</p>
+ <div class="scene"><div class="screen"></div></div>
+ <div class="cap">True size</div><div class="live"></div><div class="toast"></div>
+</section>
+
+<button class="reset" id="reset">Reset the demo Clips</button>
+
+<script>
+const IMG1='linear-gradient(135deg,#ff9f43,#c2416b 60%,#4b3a8f)', IMG2='linear-gradient(160deg,#7ee2a8,#2b7a78)';
+const DATA=[
+ {k:'text',t:'IT60 X054 2811 1010 0000 0123 456',a:'3 d',pin:1},
+ {k:'fmt',t:'Best regards, Mattia',a:'5 d',pin:1},
+ {k:'text',t:'Ciao Marco, ti giro il preventivo aggiornato con le modifiche di ieri.',a:'2 min'},
+ {k:'url',t:'https://github.com/matdac12/tasca/releases/tag/v0.1.0',a:'6 min'},
+ {k:'img',t:'Screenshot',d:'1920 × 1080',g:IMG1,a:'12 min'},
+ {k:'files',t:'Offerta_Rachello.pdf +2',f:'Offerta_Rachello.pdf Planimetria.dwg Foto_cantiere.jpg',n:3,a:'25 min'},
+ {k:'text',t:'cargo clippy --all-targets -- -D warnings',a:'40 min'},
+ {k:'fmt',t:'Riepilogo Q3: fatturato, margini e prossimi passi',a:'1 h'},
+ {k:'text',t:'March invoice for Rossi: €2,400 due 15 April',a:'1 h'},
+ {k:'img',t:'Logo draft',d:'512 × 512',g:IMG2,a:'2 h'},
+ {k:'text',t:'+39 333 123 4567',a:'3 h'},
+ {k:'text',t:'Via Roma 12, 31100 Treviso',a:'yesterday'},
+ {k:'text',t:"SELECT * FROM orders WHERE status = 'open';",a:'yesterday'},
+ {k:'text',t:'%LOCALAPPDATA%\\Tasca\\settings.ini',a:'2 d'},
+];
+let clips=[]; const reset=()=>{clips=DATA.map((c,i)=>({...c,id:i}));};
+reset();
+const st={A:{q:'',sel:0},B:{q:'',sel:0},C:{q:'',sel:0},D:{q:'',sel:0}};
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PIN='<svg viewBox="0 0 16 16" width="10" height="10"><path fill="currentColor" d="M10 1l5 5-1.6.4-2.6 2.6.2 3.4-1.4 1.4-2.9-2.9L2.4 15 1 13.6l4.3-4.3L2.4 6.4 3.8 5l3.4.2 2.6-2.6z"/></svg>';
+const LABEL={text:'Text',fmt:'Formatted text',url:'Link',img:'Image',files:'Files'};
+const sub=c=>(c.pin?PIN:'')+esc(c.k==='img'?'Image · '+c.d:c.k==='files'?c.n+' files':LABEL[c.k])+(c.pin?'':' · '+c.a);
+
+function shown(v){
+ const w=st[v].q.toLowerCase().split(/\s+/).filter(Boolean);
+ const ord=[...clips.filter(c=>c.pin),...clips.filter(c=>!c.pin)];
+ if(!w.length) return ord;
+ return ord.filter(c=>{ if(c.k==='img') return false; const h=(c.f||c.t).toLowerCase(); return w.every(x=>h.includes(x)); });
+}
+function tile(c,s){
+ const z=`width:${s}px;height:${s}px`;
+ if(c.k==='img') return `<div class="tile" style="${z};background:${c.g}"></div>`;
+ if(c.k==='files') return `<div class="tile pdf" style="${z}">PDF<span class="badge">${c.n}</span></div>`;
+ const g={text:'T',fmt:'Aa',url:'↗'}[c.k];
+ return `<div class="tile ${c.k}" style="${z}">${g}</div>`;
+}
+function rows(v,list,ts,keyFmt){
+ if(!list.length) return '<div class="empty">No Clip matches</div>';
+ let h='',inPin=null;
+ const searching=st[v].q.trim()!=='';
+ list.forEach((c,i)=>{
+  if(!searching && c.pin!==inPin && v!=='C'){ inPin=c.pin; h+=`<div class="sect">${c.pin?'Pinned':'Recent'}</div>`; }
+  h+=`<div class="row${i===st[v].sel?' sel':''}" data-i="${i}">${tile(c,ts)}<div class="meta"><div class="nm">${esc(c.t)}</div><div class="sub">${sub(c)}</div></div>${i<9?`<span class="key">${keyFmt(i+1)}</span>`:''}</div>`;
+ });
+ return h;
+}
+function cards(v,list){
+ if(!list.length) return '<div class="empty" style="width:100%">No Clip matches</div>';
+ return list.map((c,i)=>`<div class="card${i===st[v].sel?' sel':''}" data-i="${i}"><div class="ch">${tile(c,18)}<span class="sp">${c.pin?PIN+' ':''}${esc(c.k==='img'?'Image':c.k==='files'?c.n+' files':LABEL[c.k])}</span>${i<9?`<span class="key">${i+1}</span>`:''}</div>`+
+  (c.k==='img'?`<div class="cb img" style="background:${c.g}"></div>`:`<div class="cb">${esc(c.k==='files'?c.f.split(' ').join('\n'):c.t).replace(/\n/g,'<br>')}</div>`)+
+  `<div class="cf">${c.k==='img'?c.d+' · ':''}${c.pin?'Pinned':c.a}</div></div>`).join('');
+}
+const N=v=>clips.length+' Clips';
+const SHELL={
+ A:(live)=>`<div class="pn pA"><div class="srch"><span class="lens">⌕</span>${inp(live,'A','Type to search')}</div><div class="list"></div><div class="foot"><a data-clear>Clear</a><span class="n"></span></div></div>`,
+ B:(live)=>`<div class="pn pB"><div class="srch"><span class="lens">⌕</span>${inp(live,'B','Search your clipboard')}</div><div class="list"></div><div class="foot"><span class="hints"><span style="margin:0"><b>↵</b>Paste</span><span><b>⇧↵</b>Plain text</span><span><b>Ctrl P</b>Pin</span><span><b>Ctrl Del</b>Delete</span></span><a data-clear>Clear</a></div></div>`,
+ C:(live)=>`<div class="pn pC"><div class="top"><div class="srch"><span class="lens">⌕</span>${inp(live,'C','Type to search')}</div><span class="sp"></span><span class="n"></span><span class="foot"><a data-clear>Clear</a></span></div><div class="cards list"></div></div>`,
+ D:(live)=>`<div class="pn pD"><div class="hd"><span class="n"></span><a data-clear>Clear</a></div><div class="srch"><span class="lens">⌕</span>${inp(live,'D','Search')}</div><div class="list"></div></div>`,
+};
+function inp(live,v,ph){ return live?`<input placeholder="${ph}" spellcheck="false">`:`<span style="color:var(--t3)">${ph}</span>`; }
+function fill(root,v,stOverride){
+ const save=st[v]; if(stOverride) st[v]=stOverride;
+ const list=shown(v);
+ const L=root.querySelector('.list');
+ L.innerHTML= v==='C'?cards(v,list): rows(v,list,{A:28,B:34,D:30}[v],{A:n=>n,B:n=>'Alt '+n,D:n=>n}[v]);
+ root.querySelectorAll('.n').forEach(e=>e.textContent= v==='D'?'Clipboard · '+clips.length:N(v));
+ st[v]=save;
+ return list;
+}
+const SCREEN={
+ A:{x:612,y:262,cur:[606,256]},
+ B:{x:330,y:'third',cur:[930,420]},
+ C:{x:12,y:672-12-226,w:1256,cur:[700,300]},
+ D:{x:8,y:null,cur:[700,300]},
+};
+function desk(){return `<div class="win"><div class="tt"><b></b>Preventivo aggiornato · Message</div><div class="fld">To: <span>Marco Rossi</span></div><div class="fld">Subject: <span>Preventivo aggiornato</span></div><div class="body">Ciao Marco,<br>in allegato <span class="caret"></span><i class="l" style="width:90%"></i><i class="l" style="width:72%"></i><i class="l" style="width:80%"></i></div></div><div class="tb"><i></i><i></i><i class="on"></i><i></i><i></i></div>`;}
+function drawScene(sec){
+ const v=sec.dataset.v, sc=sec.querySelector('.screen'), p=SCREEN[v];
+ sc.innerHTML=desk()+`<div class="copy">${SHELL[v](false)}</div><div class="cursor" style="left:${p.cur[0]}px;top:${p.cur[1]}px"></div>`;
+ const cp=sc.querySelector('.copy');
+ fill(cp,v,{q:'',sel:0});
+ if(p.w) cp.style.width=p.w+'px';
+ cp.style.left=p.x+'px';
+ const h=cp.offsetHeight, y=p.y==null?(672-h)/2:p.y==='third'?Math.max(24,(672-h)/3):p.y;
+ cp.style.top=Math.round(Math.min(y,664-h))+'px'; // stays inside the work area, like the real window
+}
+function fit(){document.querySelectorAll('.scene').forEach(s=>s.firstElementChild.style.transform=`scale(${s.clientWidth/1280})`);}
+
+const toastT={};
+function toast(v,msg){const t=document.querySelector(`.v[data-v="${v}"] .toast`);t.textContent=msg;clearTimeout(toastT[v]);toastT[v]=setTimeout(()=>t.textContent='',3200);}
+function liveRoot(v){return document.querySelector(`.v[data-v="${v}"] .live`);}
+function refresh(){
+ for(const v in st){ const n=shown(v).length; st[v].sel=Math.max(0,Math.min(st[v].sel,n-1)); fill(liveRoot(v),v); }
+ document.querySelectorAll('.v').forEach(drawScene);
+}
+function paste(v,i,plain){
+ const list=shown(v), c=list[i]; if(!c) return;
+ const el=liveRoot(v).querySelector(`[data-i="${i}"]`); if(el){el.classList.add('flash');}
+ toast(v,`Pastes Clip ${i+1} “${c.t.length>38?c.t.slice(0,38)+'…':c.t}”${plain&&c.k!=='img'&&c.k!=='files'?' as plain text':''} into Outlook, then closes. It moves to the top.`);
+ setTimeout(()=>{ if(!c.pin){clips=[c,...clips.filter(x=>x!==c)];} st[v].sel=0; refresh(); },450);
+}
+function pin(v,i){const c=shown(v)[i]; if(!c) return; c.pin=c.pin?0:1; toast(v,(c.pin?'Pinned':'Unpinned')+` “${c.t.slice(0,30)}”`); refresh();}
+function del(v,i){const c=shown(v)[i]; if(!c) return; clips=clips.filter(x=>x!==c); toast(v,'Deleted'); refresh();}
+function clearAll(v){const n=clips.filter(c=>!c.pin).length; clips=clips.filter(c=>c.pin); st[v].sel=0; toast(v,`Cleared ${n} Clips; pins stay.`); refresh();}
+function move(v,d){const n=shown(v).length; if(!n) return; st[v].sel=Math.max(0,Math.min(n-1,st[v].sel+d)); fill(liveRoot(v),v); const s=liveRoot(v).querySelector('.sel'); s&&s.scrollIntoView({block:'nearest',inline:'nearest'});}
+
+let menu=null;
+function closeMenu(){menu&&menu.remove();menu=null;}
+function openMenu(v,i,x,y){
+ closeMenu(); const c=shown(v)[i];
+ menu=document.createElement('div'); menu.className='menu';
+ menu.innerHTML=`<div data-a="p">Paste</div><div data-a="t">Paste as plain text</div><hr><div data-a="pin">${c.pin?'Unpin':'Pin'}</div><div data-a="d">Delete</div>`;
+ menu.style.left=x+'px'; menu.style.top=y+'px'; document.body.appendChild(menu);
+ menu.onclick=e=>{const a=e.target.dataset.a; closeMenu(); if(a==='p')paste(v,i,false); if(a==='t')paste(v,i,true); if(a==='pin')pin(v,i); if(a==='d')del(v,i);};
+}
+document.addEventListener('click',e=>{ if(menu&&!menu.contains(e.target)) closeMenu(); });
+
+for(const v in st){
+ const root=liveRoot(v); root.innerHTML=SHELL[v](true); fill(root,v);
+ const input=root.querySelector('input');
+ input.addEventListener('input',()=>{st[v].q=input.value; st[v].sel=0; fill(root,v);});
+ input.addEventListener('keydown',e=>{
+  const dig=/^Digit([1-9])$/.exec(e.code);
+  if((e.altKey||e.ctrlKey)&&dig){e.preventDefault(); paste(v,+dig[1]-1,false); return;}
+  if(e.ctrlKey&&e.code==='KeyP'){e.preventDefault(); pin(v,st[v].sel); return;}
+  if(e.ctrlKey&&e.key==='Delete'){e.preventDefault(); del(v,st[v].sel); return;}
+  const horiz=v==='C';
+  const k={ArrowDown:1,ArrowUp:-1,PageDown:5,PageUp:-5,...(horiz?{ArrowRight:1,ArrowLeft:-1}:{})}[e.key];
+  if(k){e.preventDefault(); move(v,k); return;}
+  if(e.key==='Enter'){e.preventDefault(); paste(v,st[v].sel,e.shiftKey); return;}
+  if(e.key==='Escape'){e.preventDefault(); if(input.value){input.value='';st[v].q='';st[v].sel=0;fill(root,v);} else toast(v,'Closes the History; nothing is pasted.'); }
+ });
+ root.addEventListener('click',e=>{
+  if(e.target.closest('[data-clear]')){clearAll(v);return;}
+  const r=e.target.closest('[data-i]'); if(r) paste(v,+r.dataset.i,e.shiftKey);
+  input.focus();
+ });
+ root.addEventListener('contextmenu',e=>{const r=e.target.closest('[data-i]'); if(!r) return; e.preventDefault(); openMenu(v,+r.dataset.i,e.clientX,e.clientY);});
+}
+document.getElementById('reset').onclick=()=>{reset(); for(const v in st){st[v]={q:'',sel:0}; liveRoot(v).querySelector('input').value='';} refresh();};
+document.querySelectorAll('.v').forEach(drawScene);
+fit(); addEventListener('resize',fit);
+</script>
+</body></html>

@@ -1,0 +1,200 @@
+<!doctype html>
+<!-- Tasca clipboard History, round 2 (2026-10-30). Mattia picked A from
+     clipboard-history.html: the panel opens at the mouse pointer. Changes asked
+     for: no scrollbar (the list still scrolls), a reasonable fixed size, and a
+     quieter mark on the left of each row than round 1's square tiles. This page
+     shows A at 400 x up to nine rows, with four choices for that mark.
+     Mattia picked 1, the number on the left (the default view): this page, in
+     that mode, is the look to build. -->
+<html><head><meta charset="utf-8"><title>Tasca clipboard history, round 2</title><style>
+:root{--glass:rgba(18,18,20,.92);--hair:0 0 0 .5px rgba(255,255,255,.14);--t1:rgba(255,255,255,.88);--t2:rgba(255,255,255,.56);--t3:rgba(255,255,255,.34);--acc:#4cc2ff;--f:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif}
+body{font-family:var(--f)}
+body.page{background:#131316;color:#ececf1;margin:0;padding:24px;max-width:760px}
+.intro{font-size:12.5px;line-height:1.5;color:var(--muted-foreground,#a4a4b0);margin:0 0 14px}
+kbd{font:600 11px var(--f);padding:0 4px;border-radius:4px;border:1px solid var(--border,#3a3a42)}
+.seg{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 6px}
+.seg button{font:12px var(--f);color:var(--foreground,#ececf1);background:none;border:1px solid var(--border,#3a3a42);border-radius:999px;padding:5px 12px;cursor:pointer}
+.seg button.on{border-color:var(--acc);color:var(--acc)}
+.why{font-size:12px;line-height:1.5;color:var(--muted-foreground,#a4a4b0);min-height:36px;margin:0 0 12px}
+.scene{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:10px;margin-bottom:14px}
+.screen{position:absolute;left:0;top:0;width:1280px;height:720px;transform-origin:0 0;background:radial-gradient(120% 90% at 80% 10%,#3a4a63 0%,#1d2533 55%,#141821 100%)}
+.screen .copy{position:absolute;pointer-events:none}
+.tb{position:absolute;left:0;right:0;bottom:0;height:48px;background:rgba(28,30,36,.88);display:flex;justify-content:center;align-items:center;gap:10px}
+.tb i{width:26px;height:26px;border-radius:6px;background:rgba(255,255,255,.16)}.tb i.on{background:#2f7fd8}
+.win{position:absolute;left:250px;top:64px;width:780px;height:520px;border-radius:8px;background:#f3f3f5;box-shadow:0 8px 30px rgba(0,0,0,.45);color:#222;font:13px var(--f);overflow:hidden}
+.win .tt{height:32px;border-bottom:1px solid #e1e1e6;display:flex;align-items:center;padding:0 12px;font-size:12px;color:#555;gap:8px}
+.win .tt b{width:12px;height:12px;border-radius:3px;background:#2f7fd8}
+.win .fld{padding:9px 16px;border-bottom:1px solid #e8e8ec;color:#666}.win .fld span{color:#222}
+.win .body{padding:16px;line-height:1.6}
+.win .caret{display:inline-block;width:1px;height:15px;background:#222;vertical-align:-2px}
+.win i.l{display:block;height:7px;border-radius:4px;background:#dedee4;margin:12px 0}
+.cursor{position:absolute;width:0;height:0;border-left:8px solid #fff;border-top:6px solid transparent;border-bottom:6px solid transparent;transform:rotate(-125deg);filter:drop-shadow(0 1px 1px #000)}
+
+.pn{width:400px;padding:6px;background:var(--glass);box-shadow:var(--hair),0 6px 18px rgba(0,0,0,.35);color:var(--t1);border-radius:12px;box-sizing:border-box;text-align:left;font-family:var(--f)}
+.srch{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;font-size:13px;border-bottom:.5px solid rgba(255,255,255,.12);margin-bottom:4px}
+.srch input{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--t1);font:inherit;padding:0}
+.srch input::placeholder{color:var(--t3)}
+.srch .lens{color:var(--t3)}
+/* scrolls, but no scrollbar is drawn */
+.list{max-height:438px;overflow-y:auto;scrollbar-width:none}
+.list::-webkit-scrollbar{display:none}
+.row{display:flex;align-items:center;gap:10px;height:44px;padding:0 10px;box-sizing:border-box;border-radius:7px;cursor:default}
+.row:hover{background:rgba(255,255,255,.08)}
+.row.sel{background:rgba(255,255,255,.14)}
+.row.flash{background:rgba(76,194,255,.30)}
+.meta{min-width:0;flex:1}
+.nm{font-size:12.5px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub{font-size:10.5px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sub svg{vertical-align:-1px;margin-right:3px}
+.sect{color:var(--t3);font-size:10.5px;padding:7px 10px 3px}
+.empty{color:var(--t3);text-align:center;padding:18px 0;font-size:12px}
+.foot{display:flex;justify-content:space-between;align-items:center;height:28px;padding:0 10px;border-top:.5px solid rgba(255,255,255,.12);margin-top:4px;color:var(--t2);font-size:11px}
+.foot a{color:var(--t2);text-decoration:none;cursor:default}.foot a:hover{color:var(--t1)}
+/* the four left marks */
+.lead-num{flex:none;width:12px;text-align:right;font-size:12px;color:var(--t3);font-variant-numeric:tabular-nums}
+.row.sel .lead-num{color:var(--t2)}
+.lead-gl{flex:none;width:16px;height:16px;color:var(--t3);display:grid;place-items:center}
+.row.sel .lead-gl{color:var(--t2)}
+.lead-tile{flex:none;width:28px;height:28px;border-radius:6px;background:#2a2a30;color:var(--t2);display:grid;place-items:center;font:700 11px var(--f);position:relative}
+.lead-tile.fmt{color:#8ab4ff}.lead-tile.url{color:var(--acc)}.lead-tile.pdf{color:#ff6b76}
+.badge{position:absolute;right:-5px;top:-5px;min-width:15px;height:15px;padding:0 3px;box-sizing:border-box;border-radius:8px;background:#fff;color:#121214;font:700 9px/15px var(--f);text-align:center}
+.thumb{flex:none;width:44px;height:28px;border-radius:4px;box-shadow:0 0 0 .5px rgba(255,255,255,.18)}
+.key{flex:none;color:var(--t3);font-size:10.5px;font-variant-numeric:tabular-nums}
+.key.cap{border:.5px solid rgba(255,255,255,.2);border-radius:4px;padding:0 5px;line-height:16px}
+.live{display:flex;justify-content:center}
+.toast{min-height:18px;margin-top:8px;font-size:11.5px;color:var(--acc);text-align:center}
+.menu{position:fixed;z-index:9;min-width:190px;padding:4px;border-radius:8px;background:#2c2c2c;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 8px 24px rgba(0,0,0,.45);font:12px var(--f);color:#fff}
+.menu div{padding:7px 12px;border-radius:4px;cursor:default}.menu div:hover{background:rgba(255,255,255,.08)}
+.menu hr{border:0;border-top:1px solid rgba(255,255,255,.1);margin:4px 0}
+</style></head><body class="page">
+
+<p class="intro">A, opening at the mouse pointer: 400 wide, as tall as its Clips up to nine rows (one per <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>9</kbd>), then it scrolls with no scrollbar. Pick the mark on the left of each row:</p>
+<div class="seg" id="seg"></div>
+<p class="why" id="why"></p>
+<div class="scene"><div class="screen"></div></div>
+<div class="live"></div><div class="toast"></div>
+
+<script>
+const IMG1='linear-gradient(135deg,#ff9f43,#c2416b 60%,#4b3a8f)', IMG2='linear-gradient(160deg,#7ee2a8,#2b7a78)';
+const DATA=[
+ {k:'text',t:'IT60 X054 2811 1010 0000 0123 456',a:'3 d',pin:1},
+ {k:'fmt',t:'Best regards, Mattia',a:'5 d',pin:1},
+ {k:'text',t:'Ciao Marco, ti giro il preventivo aggiornato con le modifiche di ieri.',a:'2 min'},
+ {k:'url',t:'https://github.com/matdac12/tasca/releases/tag/v0.1.0',a:'6 min'},
+ {k:'img',t:'Screenshot',d:'1920 × 1080',g:IMG1,a:'12 min'},
+ {k:'files',t:'Offerta_Rachello.pdf +2',f:'Offerta_Rachello.pdf Planimetria.dwg Foto_cantiere.jpg',n:3,a:'25 min'},
+ {k:'text',t:'cargo clippy --all-targets -- -D warnings',a:'40 min'},
+ {k:'fmt',t:'Riepilogo Q3: fatturato, margini e prossimi passi',a:'1 h'},
+ {k:'text',t:'March invoice for Rossi: €2,400 due 15 April',a:'1 h'},
+ {k:'img',t:'Logo draft',d:'512 × 512',g:IMG2,a:'2 h'},
+ {k:'text',t:'+39 333 123 4567',a:'3 h'},
+ {k:'text',t:'Via Roma 12, 31100 Treviso',a:'yesterday'},
+ {k:'text',t:"SELECT * FROM orders WHERE status = 'open';",a:'yesterday'},
+ {k:'text',t:'%LOCALAPPDATA%\\Tasca\\settings.ini',a:'2 d'},
+];
+const MODES={
+ num:{label:'1 · Number on the left',why:'The Alt-number sits where the square was, small and grey, like ClipClip\'s numbered menu. The type moves into the grey line under the text. Only images keep a picture: a small preview on the right.'},
+ glyph:{label:'2 · Faint outline icon',why:'A thin grey line icon (text, formatted, link, image, files) with no box behind it, the Alt-number in grey on the right. Images get the small preview on the right too.'},
+ none:{label:'3 · Nothing',why:'Text only. The type is in the grey line, the Alt-number in grey on the right, images show the small preview on the right.'},
+ tile:{label:'4 · Round 1 squares',why:'Round 1, for comparison: a filled 28 px square per row.'},
+};
+let mode='num', clips=[], st={q:'',sel:0};
+const reset=()=>{clips=DATA.map(c=>({...c}));}; reset();
+const esc=s=>s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PIN='<svg viewBox="0 0 16 16" width="10" height="10"><path fill="currentColor" d="M10 1l5 5-1.6.4-2.6 2.6.2 3.4-1.4 1.4-2.9-2.9L2.4 15 1 13.6l4.3-4.3L2.4 6.4 3.8 5l3.4.2 2.6-2.6z"/></svg>';
+const S='fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"';
+const GL={
+ text:`<svg viewBox="0 0 16 16" width="15" height="15" ${S}><path d="M3 4h10M3 8h10M3 12h6"/></svg>`,
+ fmt:`<svg viewBox="0 0 16 16" width="15" height="15" ${S}><path d="M3 13l3.5-9 3.5 9M4.4 9.5h4.2M11.5 13V8.5M11.5 8.5c0-1 2.5-1 2.5 0V13"/></svg>`,
+ url:`<svg viewBox="0 0 16 16" width="15" height="15" ${S}><path d="M7 9.5a2.6 2.6 0 003.7 0l2.4-2.4a2.6 2.6 0 00-3.7-3.7l-.9.9M9 6.5a2.6 2.6 0 00-3.7 0L2.9 8.9a2.6 2.6 0 003.7 3.7l.9-.9"/></svg>`,
+ img:`<svg viewBox="0 0 16 16" width="15" height="15" ${S}><rect x="2" y="3" width="12" height="10" rx="1.5"/><circle cx="6" cy="6.5" r="1"/><path d="M2.5 12l3.5-3.5 2.5 2.5 2-2 3 3"/></svg>`,
+ files:`<svg viewBox="0 0 16 16" width="15" height="15" ${S}><path d="M4 2h5l3 3v9H4zM9 2v3h3"/></svg>`,
+};
+const LABEL={text:'Text',fmt:'Formatted text',url:'Link',img:'Image',files:'Files'};
+function shown(){
+ const w=st.q.toLowerCase().split(/\s+/).filter(Boolean);
+ const ord=[...clips.filter(c=>c.pin),...clips.filter(c=>!c.pin)];
+ if(!w.length) return ord;
+ return ord.filter(c=>c.k!=='img'&&w.every(x=>(c.f||c.t).toLowerCase().includes(x)));
+}
+function subline(c){
+ const what=c.k==='img'?'Image · '+c.d:c.k==='files'?c.n+' files':LABEL[c.k];
+ return (c.pin?PIN:'')+esc(what)+(c.pin?'':' · '+c.a);
+}
+function lead(c,i){
+ if(mode==='num') return `<span class="lead-num">${i<9?i+1:''}</span>`;
+ if(mode==='glyph') return `<span class="lead-gl">${GL[c.k]}</span>`;
+ if(mode==='tile'){
+  if(c.k==='img') return `<span class="lead-tile" style="background:${c.g}"></span>`;
+  if(c.k==='files') return `<span class="lead-tile pdf">PDF<span class="badge">${c.n}</span></span>`;
+  return `<span class="lead-tile ${c.k}">${{text:'T',fmt:'Aa',url:'↗'}[c.k]}</span>`;
+ }
+ return '';
+}
+function tail(c,i){
+ let h='';
+ if(c.k==='img'&&mode!=='tile') h+=`<span class="thumb" style="background:${c.g}"></span>`;
+ if(mode!=='num'&&i<9) h+=`<span class="key${mode==='tile'?' cap':''}">${i+1}</span>`;
+ return h;
+}
+function rowsHtml(s){
+ const save=st; if(s) st=s;
+ const list=shown(); let h='',inPin=null; const searching=st.q.trim()!=='';
+ if(!list.length) h='<div class="empty">No Clip matches</div>';
+ list.forEach((c,i)=>{
+  if(!searching&&c.pin!==inPin){inPin=c.pin;h+=`<div class="sect">${c.pin?'Pinned':'Recent'}</div>`;}
+  h+=`<div class="row${i===st.sel?' sel':''}" data-i="${i}">${lead(c,i)}<div class="meta"><div class="nm">${esc(c.t)}</div><div class="sub">${subline(c)}</div></div>${tail(c,i)}</div>`;
+ });
+ st=save; return h;
+}
+const shell=live=>`<div class="pn"><div class="srch"><span class="lens">⌕</span>${live?'<input placeholder="Type to search" spellcheck="false">':'<span style="color:var(--t3)">Type to search</span>'}</div><div class="list"></div><div class="foot"><a data-clear>Clear</a><span class="n"></span></div></div>`;
+const live=document.querySelector('.live'), screen=document.querySelector('.screen');
+function fillLive(){live.querySelector('.list').innerHTML=rowsHtml(); live.querySelector('.n').textContent=clips.length+' Clips';}
+function drawScene(){
+ screen.innerHTML=`<div class="win"><div class="tt"><b></b>Preventivo aggiornato · Message</div><div class="fld">To: <span>Marco Rossi</span></div><div class="fld">Subject: <span>Preventivo aggiornato</span></div><div class="body">Ciao Marco,<br>in allegato <span class="caret"></span><i class="l" style="width:90%"></i><i class="l" style="width:72%"></i><i class="l" style="width:80%"></i></div></div><div class="tb"><i></i><i></i><i class="on"></i><i></i><i></i></div><div class="copy">${shell(false)}</div><div class="cursor" style="left:606px;top:236px"></div>`;
+ const cp=screen.querySelector('.copy');
+ cp.querySelector('.list').innerHTML=rowsHtml({q:'',sel:0}); cp.querySelector('.n').textContent=clips.length+' Clips';
+ cp.style.left='612px'; cp.style.top=Math.round(Math.min(242,664-cp.offsetHeight))+'px';
+}
+function fit(){const s=document.querySelector('.scene');screen.style.transform=`scale(${s.clientWidth/1280})`;}
+function refresh(){st.sel=Math.max(0,Math.min(st.sel,shown().length-1));fillLive();drawScene();}
+let tt; function toast(m){const t=document.querySelector('.toast');t.textContent=m;clearTimeout(tt);tt=setTimeout(()=>t.textContent='',3200);}
+function paste(i,plain){const c=shown()[i]; if(!c) return; const el=live.querySelector(`[data-i="${i}"]`); el&&el.classList.add('flash');
+ toast(`Pastes Clip ${i+1} “${c.t.length>38?c.t.slice(0,38)+'…':c.t}”${plain&&c.k!=='img'&&c.k!=='files'?' as plain text':''} into Outlook, then closes.`);
+ setTimeout(()=>{if(!c.pin)clips=[c,...clips.filter(x=>x!==c)];st.sel=0;refresh();},450);}
+function pin(i){const c=shown()[i]; if(!c) return; c.pin=c.pin?0:1; toast((c.pin?'Pinned':'Unpinned')+` “${c.t.slice(0,30)}”`); refresh();}
+function del(i){const c=shown()[i]; if(!c) return; clips=clips.filter(x=>x!==c); toast('Deleted'); refresh();}
+function move(d){const n=shown().length; if(!n) return; st.sel=Math.max(0,Math.min(n-1,st.sel+d)); fillLive(); const s=live.querySelector('.sel'); s&&s.scrollIntoView({block:'nearest'});}
+let menu=null; const closeMenu=()=>{menu&&menu.remove();menu=null;};
+document.addEventListener('click',e=>{if(menu&&!menu.contains(e.target))closeMenu();});
+
+live.innerHTML=shell(true);
+const input=live.querySelector('input');
+input.addEventListener('input',()=>{st.q=input.value;st.sel=0;fillLive();});
+input.addEventListener('keydown',e=>{
+ const dig=/^Digit([1-9])$/.exec(e.code);
+ if((e.altKey||e.ctrlKey)&&dig){e.preventDefault();paste(+dig[1]-1,false);return;}
+ if(e.ctrlKey&&e.code==='KeyP'){e.preventDefault();pin(st.sel);return;}
+ if(e.ctrlKey&&e.key==='Delete'){e.preventDefault();del(st.sel);return;}
+ const k={ArrowDown:1,ArrowUp:-1,PageDown:5,PageUp:-5}[e.key];
+ if(k){e.preventDefault();move(k);return;}
+ if(e.key==='Enter'){e.preventDefault();paste(st.sel,e.shiftKey);return;}
+ if(e.key==='Escape'){e.preventDefault(); if(input.value){input.value='';st.q='';st.sel=0;fillLive();} else toast('Closes the History; nothing is pasted.');}
+});
+live.addEventListener('click',e=>{
+ if(e.target.closest('[data-clear]')){const n=clips.filter(c=>!c.pin).length;clips=clips.filter(c=>c.pin);st.sel=0;toast(`Cleared ${n} Clips; pins stay. (Mode buttons reset the demo.)`);refresh();return;}
+ const r=e.target.closest('[data-i]'); if(r) paste(+r.dataset.i,e.shiftKey); input.focus();
+});
+live.addEventListener('contextmenu',e=>{const r=e.target.closest('[data-i]'); if(!r) return; e.preventDefault(); closeMenu(); const i=+r.dataset.i, c=shown()[i];
+ menu=document.createElement('div'); menu.className='menu';
+ menu.innerHTML=`<div data-a="p">Paste</div><div data-a="t">Paste as plain text</div><hr><div data-a="pin">${c.pin?'Unpin':'Pin'}</div><div data-a="d">Delete</div>`;
+ menu.style.left=e.clientX+'px'; menu.style.top=e.clientY+'px'; document.body.appendChild(menu);
+ menu.onclick=ev=>{const a=ev.target.dataset.a; closeMenu(); if(a==='p')paste(i,false); if(a==='t')paste(i,true); if(a==='pin')pin(i); if(a==='d')del(i);};
+});
+const seg=document.getElementById('seg');
+seg.innerHTML=Object.entries(MODES).map(([k,m])=>`<button data-m="${k}">${m.label}</button>`).join('');
+seg.onclick=e=>{const b=e.target.closest('button'); if(!b) return; mode=b.dataset.m; reset(); st={q:'',sel:0}; input.value=''; setMode();};
+function setMode(){seg.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.m===mode)); document.getElementById('why').textContent=MODES[mode].why; refresh();}
+setMode(); fit(); addEventListener('resize',fit);
+</script>
+</body></html>
