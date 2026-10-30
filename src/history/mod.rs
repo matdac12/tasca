@@ -23,6 +23,7 @@ mod paste;
 mod record;
 mod search;
 mod state;
+mod store;
 mod text;
 mod window;
 
