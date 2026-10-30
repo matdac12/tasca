@@ -33,6 +33,9 @@ pub const WM_SHOW_HISTORY: u32 = WM_APP + 21;
 /// A clipboard read on the History's worker finished; the text is in a queue, not in the message.
 pub const WM_HISTORY_READ: u32 = WM_APP + 22;
 
+/// The History store finished loading on its worker; the Clips are in a queue, not in the message.
+pub const WM_HISTORY_LOADED: u32 = WM_APP + 23;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,6 +54,7 @@ mod tests {
             WM_SETTINGS_SAVED,
             WM_SHOW_HISTORY,
             WM_HISTORY_READ,
+            WM_HISTORY_LOADED,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");

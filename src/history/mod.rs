@@ -23,21 +23,25 @@ mod paste;
 mod record;
 mod search;
 mod state;
+mod store;
 mod text;
 mod window;
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::Result;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_HOTKEY, WM_TIMER};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, PostMessageW, WM_HOTKEY, WM_TIMER};
 
 use crate::hotkey::Slot;
 use crate::log::log;
-use crate::proto::{WM_HISTORY_READ, WM_SHOW_HISTORY};
+use crate::proto::{WM_HISTORY_LOADED, WM_HISTORY_READ, WM_SHOW_HISTORY};
+use clip::Clip;
 use layout::{Hit, Layout};
 use state::{Effect, Event, Machine, Target};
+use store::{Record, Store};
 
 /// Not exported by the `windows` features we enable.
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
@@ -63,6 +67,9 @@ struct Shell {
     followed: usize,
     /// Recording copies (the clipboard listener is registered).
     listening: bool,
+    /// The worker that reads and writes the saved History; `None` when
+    /// `%LOCALAPPDATA%` is not set (the History then lives in memory only).
+    store: Option<Store>,
 }
 
 impl Shell {
@@ -75,6 +82,10 @@ impl Shell {
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
+
+/// The saved History, handed from the store's worker to the UI thread (the
+/// message that follows carries no data).
+static LOADED: Mutex<Option<Vec<Record>>> = Mutex::new(None);
 
 thread_local! {
     static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) };
@@ -109,6 +120,7 @@ pub fn create(resident: HWND) -> Result<()> {
             scroll: 0.0,
             followed: 0,
             listening: true,
+            store: start_store(resident),
         })
     });
     if let Err(e) = draw::init() {
@@ -118,8 +130,23 @@ pub fn create(resident: HWND) -> Result<()> {
     Ok(())
 }
 
+/// Start the store's worker and ask it to read the saved History.
+fn start_store(resident: HWND) -> Option<Store> {
+    let store = Store::spawn(store::default_dir()?);
+    let resident = resident.0 as isize;
+    store.load(move |records| {
+        *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(records);
+        let hwnd = HWND(resident as *mut _);
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_HISTORY_LOADED, WPARAM(0), LPARAM(0));
+        }
+    });
+    Some(store)
+}
+
 pub fn destroy(resident: HWND) {
     record::stop(resident);
+    finish_load();
     with(|s| s.listening = false);
     draw::destroy();
     if let Some(shell) = SHELL.with(|c| c.borrow_mut().take()) {
@@ -136,6 +163,7 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     match msg {
         WM_CLIPBOARDUPDATE => record::on_update(hwnd),
         WM_HISTORY_READ => record::on_read(hwnd),
+        WM_HISTORY_LOADED => on_loaded(),
         WM_TIMER if wp.0 == paste::T_WRITE => paste::on_write_retry(hwnd),
         WM_TIMER if wp.0 == paste::T_KEYS => paste::on_keys(hwnd),
         WM_HOTKEY if Slot::from_id(wp.0 as i32) == Some(Slot::History) => toggle(),
@@ -143,6 +171,35 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         _ => return None,
     }
     Some(LRESULT(0))
+}
+
+/// Quit before the saved History was merged in: wait for the worker to finish
+/// reading, merge it and queue the save, so what was copied since start is not
+/// lost (a save is held back until the merge). A short block at quit.
+fn finish_load() {
+    if with(|s| !s.machine.is_loaded() && s.store.is_some()) != Some(true) {
+        return;
+    }
+    // The wait is on the worker only; nothing in it pumps messages.
+    with(|s| s.store.as_ref().map(Store::flush));
+    on_loaded();
+}
+
+/// The store's worker finished reading: merge the saved Clips in.
+fn on_loaded() {
+    let Some(records) = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let clips: Vec<Clip> = records.into_iter().filter_map(Clip::from_record).collect();
+    log(format!("history: loaded {} saved clips", clips.len()));
+    dispatch(Event::Loaded(clips));
+}
+
+/// Hand the Clips to the store's worker (the write happens there).
+fn save() {
+    with(|s| {
+        if let Some(store) = &s.store {
+            store.save(s.machine.clips().iter().map(Clip::to_record).collect());
+        }
+    });
 }
 
 /// Alt+V: open, or close when already open.
@@ -240,6 +297,7 @@ fn apply(effect: Effect) {
         Effect::MoveToTop(id) => log(format!("history: clip {} to the top", id.0)),
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
         Effect::Redraw => redraw(),
+        Effect::Save => save(),
         Effect::Close => window::hide(window),
         Effect::Paste { clip, target, plain } => paste::paste(resident, window, &clip, target, plain),
         Effect::Copy { clip, plain } => paste::copy(resident, window, &clip, plain),
