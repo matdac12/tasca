@@ -78,7 +78,7 @@ pub fn pointer_monitor() -> ((i32, i32), Work, u32) {
         let (mut dx, mut dy) = (96u32, 96u32);
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
         let r = mi.rcWork;
-        ((p.x, p.y), Work { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, dx)
+        ((p.x, p.y), Work { left: r.left, top: r.top, right: r.right, bottom: r.bottom }, crate::shelf::dev_dpi().unwrap_or(dx))
     }
 }
 
