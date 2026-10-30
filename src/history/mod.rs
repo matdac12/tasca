@@ -9,6 +9,7 @@
 //! - `window.rs`  the window class, placement, wndproc
 //! - `draw.rs`    what the window shows (Direct2D, like the Shelf)
 //! - `layout.rs`  the panel's geometry and hit-testing (pure)
+//! - `menu.rs`    the right-click menu of a row
 //! - `text.rs`    row titles, type lines, ages (pure)
 //!
 //! All state lives on the UI thread in `SHELL`. The machine is stepped inside
@@ -19,6 +20,7 @@
 mod clip;
 mod draw;
 mod layout;
+mod menu;
 mod paste;
 mod record;
 mod search;
@@ -74,7 +76,7 @@ struct Shell {
 
 impl Shell {
     fn layout(&self) -> Layout {
-        Layout::new(self.scale, self.machine.shown().len(), 0, !self.machine.query().trim().is_empty())
+        Layout::new(self.scale, self.machine.shown().len(), self.machine.shown_pinned(), !self.machine.query().trim().is_empty())
     }
 }
 
@@ -296,6 +298,7 @@ fn apply(effect: Effect) {
         Effect::Add(id) => log(format!("history: recorded clip {}", id.0)),
         Effect::MoveToTop(id) => log(format!("history: clip {} to the top", id.0)),
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
+        Effect::Refused(why) => log(format!("history: action ignored ({why:?})")),
         Effect::Redraw => redraw(),
         Effect::Save => save(),
         Effect::Close => window::hide(window),
@@ -342,7 +345,11 @@ fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
     let first = visible.start;
     let rows = clips[visible]
         .iter()
-        .map(|c| draw::RowView { title: text::one_line(&c.text), sub: text::type_line(&c.text, now, c.last_copied_ms) })
+        .map(|c| draw::RowView {
+            title: text::one_line(&c.text),
+            sub: if c.pinned { text::pinned_line(&c.text) } else { text::type_line(&c.text, now, c.last_copied_ms) },
+            pinned: c.pinned,
+        })
         .collect();
     draw::View {
         layout,
@@ -383,12 +390,27 @@ pub(crate) fn on_mouse_leave() {
 
 /// The left button went down at client pixel (x, y).
 pub(crate) fn on_click(x: i32, y: i32, shift: bool) {
-    let row = with(|s| match s.layout().hit(x, y, s.scroll) {
-        Hit::Row(i) if s.machine.is_open() => Some(i),
+    let hit = with(|s| if s.machine.is_open() { Some(s.layout().hit(x, y, s.scroll)) } else { None });
+    match hit {
+        Some(Some(Hit::Row(row))) => dispatch(Event::Click { row, shift }),
+        Some(Some(Hit::Clear)) => dispatch(Event::Clear),
+        _ => {}
+    }
+}
+
+/// The right button went up at client pixel (x, y): the row's menu. The shell
+/// is borrowed only to read what the menu needs; the menu runs its own message
+/// loop, so nothing is held while it is up. The Clip is named by id because
+/// the list can change meanwhile (a copy arriving).
+pub(crate) fn on_right_click(x: i32, y: i32) {
+    let target = with(|s| match s.layout().hit(x, y, s.scroll) {
+        Hit::Row(i) if s.machine.is_open() => s.machine.shown().get(i).map(|c| (s.window, c.id, c.pinned)),
         _ => None,
     });
-    if let Some(Some(row)) = row {
-        dispatch(Event::Click { row, shift });
+    let Some(Some((window, id, pinned))) = target else { return };
+    dispatch(Event::Select(id));
+    if let Some(action) = menu::pick(window, pinned, x, y) {
+        dispatch(Event::ClipAction { id, action });
     }
 }
 

@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, ScreenToC
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
+    GetKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -215,7 +215,7 @@ fn track_leave(hwnd: HWND) {
 
 /// The key a virtual-key code stands for. A digit counts only with Alt or
 /// Ctrl (the number shortcuts); a bare digit is left to `WM_CHAR` and goes
-/// into the search.
+/// into the search. Delete and P count only with Ctrl (a bare P is typed).
 fn key_of(vk: u16, mods: Mods) -> Option<Key> {
     match vk {
         v if v == VK_UP.0 => Some(Key::Up),
@@ -225,6 +225,8 @@ fn key_of(vk: u16, mods: Mods) -> Option<Key> {
         v if v == VK_RETURN.0 => Some(Key::Enter),
         v if v == VK_ESCAPE.0 => Some(Key::Esc),
         v if v == VK_BACK.0 => Some(Key::Backspace),
+        v if v == VK_DELETE.0 && mods.ctrl => Some(Key::Delete),
+        v if v == b'P' as u16 && mods.ctrl => Some(Key::Pin),
         v @ 0x31..=0x39 if mods.alt || mods.ctrl => Some(Key::Digit((v - 0x30) as u8)),
         _ => None,
     }
@@ -292,8 +294,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 let mods = mods_now();
                 match key_of(wp.0 as u16, mods) {
-                    // A held Esc or Enter must not clear, then close (or paste twice).
-                    Some(Key::Esc | Key::Enter) if lp.0 & KEY_REPEAT != 0 => LRESULT(0),
+                    // A held Esc or Enter must not clear, then close (or paste twice);
+                    // a held Ctrl+P or Ctrl+Delete must not flip or delete again and again.
+                    Some(Key::Esc | Key::Enter | Key::Pin | Key::Delete) if lp.0 & KEY_REPEAT != 0 => LRESULT(0),
                     Some(key) => {
                         super::dispatch(Event::Key(key, mods));
                         LRESULT(0)
@@ -311,6 +314,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_LBUTTONDOWN => {
                 let (x, y) = xy(lp);
                 super::on_click(x, y, wp.0 & MK_SHIFT != 0);
+                LRESULT(0)
+            }
+            WM_RBUTTONUP => {
+                let (x, y) = xy(lp);
+                super::on_right_click(x, y);
                 LRESULT(0)
             }
             // No menu bar to activate, and no beep for Alt+letter.
@@ -428,6 +436,16 @@ mod tests {
         assert_eq!(key_of(b'3' as u16, NONE), None);
         assert_eq!(key_of(b'3' as u16, Mods { shift: true, ..NONE }), None);
         assert_eq!(key_of(b'0' as u16, ALT), None);
+    }
+
+    #[test]
+    fn ctrl_p_and_ctrl_delete_are_keys_but_bare_p_and_delete_are_not() {
+        let ctrl = Mods { ctrl: true, ..NONE };
+        assert_eq!(key_of(b'P' as u16, ctrl), Some(Key::Pin));
+        assert_eq!(key_of(VK_DELETE.0, ctrl), Some(Key::Delete));
+        assert_eq!(key_of(b'P' as u16, NONE), None);
+        assert_eq!(key_of(VK_DELETE.0, NONE), None);
+        assert_eq!(key_of(VK_DELETE.0, ALT), None);
     }
 
     #[test]

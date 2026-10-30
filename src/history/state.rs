@@ -38,6 +38,19 @@ pub enum Key {
     Backspace,
     /// 1..=9 on the main row; acts only with Alt or Ctrl (a bare digit is typed).
     Digit(u8),
+    /// P: pins or unpins with Ctrl (without it the letter is typed).
+    Pin,
+    /// Delete: deletes the selected Clip with Ctrl.
+    Delete,
+}
+
+/// What the right-click menu can do to a Clip.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    Paste,
+    PastePlain,
+    TogglePin,
+    Delete,
 }
 
 /// Modifiers held when a key went down.
@@ -61,6 +74,14 @@ pub enum Event {
     Char(char),
     /// A left click on a row of the shown list.
     Click { row: usize, shift: bool },
+    /// A right-click menu choice. The Clip is named by id: the list can change
+    /// while the menu is up.
+    ClipAction { id: ClipId, action: Action },
+    /// A right-click on a row: select it, so the highlight shows which Clip
+    /// the menu acts on.
+    Select(ClipId),
+    /// "Clear" in the footer: every unpinned Clip goes, pins stay.
+    Clear,
     /// The saved History was read at startup (newest first).
     Loaded(Vec<Clip>),
     /// The History was opened; `None` when there is no app to paste into.
@@ -94,6 +115,16 @@ pub enum Effect {
     Redraw,
     /// The Clips changed: write them to the store (once it has been read).
     Save,
+    /// An action was ignored; the shell logs why.
+    Refused(Refusal),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refusal {
+    /// Pinning would pass `store::MAX_PINNED`.
+    TooManyPins,
+    /// Delete and Clear wait for the stored History: it would bring them back.
+    NotLoaded,
 }
 
 #[derive(Default)]
@@ -123,7 +154,15 @@ impl Machine {
     /// 1..9 and `selected` count in this list.
     pub fn shown(&self) -> Vec<&Clip> {
         let words = search::words(&self.query);
-        self.clips.iter().filter(|c| search::matches(&words, &c.text)).collect()
+        let mut shown: Vec<&Clip> = self.clips.iter().filter(|c| search::matches(&words, &c.text)).collect();
+        // Pinned Clips first; the sort is stable, so each section stays newest first.
+        shown.sort_by_key(|c| !c.pinned);
+        shown
+    }
+
+    /// How many of the shown Clips, from the top, are pinned.
+    pub fn shown_pinned(&self) -> usize {
+        self.shown().iter().take_while(|c| c.pinned).count()
     }
 
     pub fn query(&self) -> &str {
@@ -166,7 +205,13 @@ impl Machine {
                 self.edited()
             }
             Event::Click { row, shift } if self.open => self.paste_row(row, shift, now_ms),
-            Event::Key(..) | Event::Char(_) | Event::Click { .. } => Vec::new(),
+            Event::ClipAction { id, action } if self.open => self.clip_action(id, action, now_ms),
+            Event::Select(id) if self.open => match self.shown().iter().position(|c| c.id == id) {
+                Some(row) => self.select(row),
+                None => Vec::new(),
+            },
+            Event::Clear => self.clear(),
+            Event::Key(..) | Event::Char(_) | Event::Click { .. } | Event::ClipAction { .. } | Event::Select(_) => Vec::new(),
             Event::Deactivated => self.close(),
         }
     }
@@ -293,7 +338,79 @@ impl Machine {
                 self.paste_row(n as usize - 1, false, now_ms)
             }
             Key::Digit(_) => Vec::new(),
+            Key::Pin if mods.ctrl => self.selected_id().map_or_else(Vec::new, |id| self.toggle_pin(id)),
+            Key::Delete if mods.ctrl => self.selected_id().map_or_else(Vec::new, |id| self.delete(id)),
+            Key::Pin | Key::Delete => Vec::new(),
         }
+    }
+
+    fn selected_id(&self) -> Option<ClipId> {
+        self.shown().get(self.selected).map(|c| c.id)
+    }
+
+    fn clip_action(&mut self, id: ClipId, action: Action, now_ms: u64) -> Vec<Effect> {
+        let Some(row) = self.shown().iter().position(|c| c.id == id) else { return Vec::new() };
+        match action {
+            Action::Paste => self.paste_row(row, false, now_ms),
+            Action::PastePlain => self.paste_row(row, true, now_ms),
+            Action::TogglePin => self.toggle_pin(id),
+            Action::Delete => self.delete(id),
+        }
+    }
+
+    /// The selection stays on Clip `id` after the list changed (else it keeps
+    /// its row number, within the list).
+    fn follow(&mut self, id: Option<ClipId>) {
+        let shown = self.shown();
+        let at = id.and_then(|id| shown.iter().position(|c| c.id == id));
+        self.selected = at.unwrap_or(self.selected).min(shown.len().saturating_sub(1));
+    }
+
+    /// The Clips changed: save them, and redraw when the History is showing.
+    fn changed(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.save(&mut effects);
+        if self.open {
+            effects.push(Effect::Redraw);
+        }
+        effects
+    }
+
+    /// Pin a Clip, or unpin it (then it falls back among the Recent ones by
+    /// its last-copied time, and the cap applies to it again).
+    fn toggle_pin(&mut self, id: ClipId) -> Vec<Effect> {
+        let pins = self.clips.iter().filter(|c| c.pinned).count();
+        if pins >= store::MAX_PINNED && self.clips.iter().any(|c| c.id == id && !c.pinned) {
+            return vec![Effect::Refused(Refusal::TooManyPins)];
+        }
+        let selected = self.selected_id();
+        let Some(clip) = self.clips.iter_mut().find(|c| c.id == id) else { return Vec::new() };
+        clip.pinned = !clip.pinned;
+        self.trim();
+        self.follow(selected);
+        self.changed()
+    }
+
+    fn delete(&mut self, id: ClipId) -> Vec<Effect> {
+        if !self.loaded {
+            return vec![Effect::Refused(Refusal::NotLoaded)];
+        }
+        let selected = self.selected_id().filter(|s| *s != id);
+        self.clips.retain(|c| c.id != id);
+        self.follow(selected);
+        self.changed()
+    }
+
+    fn clear(&mut self) -> Vec<Effect> {
+        if !self.loaded {
+            return vec![Effect::Refused(Refusal::NotLoaded)];
+        }
+        if self.clips.iter().all(|c| c.pinned) {
+            return Vec::new();
+        }
+        self.clips.retain(|c| c.pinned);
+        self.selected = 0;
+        self.changed()
     }
 
     /// Move the selection; redraw only when it moved.
@@ -387,6 +504,13 @@ mod tests {
     /// The shown list as texts.
     fn shown(m: &Machine) -> Vec<&str> {
         m.shown().iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// The same, with the stored History already read (Delete and Clear wait for it).
+    fn open_loaded(items: &[&str]) -> Machine {
+        let mut m = open_with(items);
+        m.go(Event::Loaded(vec![]));
+        m
     }
 
     /// An open History (with a paste target) holding `items`, the last one newest.
@@ -844,5 +968,309 @@ mod tests {
         assert_eq!(fx, [Effect::Redraw]);
         let fx = m.go(press(Key::Enter));
         assert!(fx.contains(&Effect::Save));
+    }
+
+    fn with_loaded(items: &[&str]) -> Machine {
+        let mut m = with(items);
+        m.go(Event::Loaded(vec![]));
+        m
+    }
+
+    fn pin_selected(m: &mut Machine) -> Vec<Effect> {
+        m.go(chord(Key::Pin, false, true, false))
+    }
+
+    fn delete_selected(m: &mut Machine) -> Vec<Effect> {
+        m.go(chord(Key::Delete, false, true, false))
+    }
+
+    #[test]
+    fn ctrl_p_pins_the_selected_clip_and_it_moves_to_the_pinned_section() {
+        let mut m = Machine::default();
+        m.go(Event::Loaded(vec![]));
+        for (i, t) in ["a", "b", "c"].iter().enumerate() {
+            m.go(copy(i as u32 + 1, t));
+        }
+        m.go(Event::Opened(Some(APP))); // c, b, a
+        m.go(press(Key::Down));
+        m.go(press(Key::Down)); // "a"
+        let fx = pin_selected(&mut m);
+        assert_eq!(fx, [Effect::Save, Effect::Redraw]);
+        assert_eq!(shown(&m), ["a", "c", "b"]);
+        assert_eq!(m.shown_pinned(), 1);
+        // The selection follows the Clip, now number 1.
+        assert_eq!(m.selected(), 0);
+        let fx = m.go(chord(Key::Digit(1), true, false, false));
+        assert!(matches!(fx.last(), Some(Effect::Paste { clip, .. }) if clip.text == "a" && clip.pinned));
+    }
+
+    #[test]
+    fn ctrl_p_again_unpins_and_the_clip_returns_to_recent_by_its_time() {
+        let mut m = Machine::default();
+        m.step(copy(1, "a"), 1_000);
+        m.step(copy(2, "b"), 2_000);
+        m.step(copy(3, "c"), 3_000);
+        m.go(Event::Opened(Some(APP)));
+        m.go(press(Key::Down));
+        m.go(press(Key::Down));
+        pin_selected(&mut m); // a pinned
+        assert_eq!(shown(&m), ["a", "c", "b"]);
+        pin_selected(&mut m); // the selection followed "a"
+        assert_eq!(shown(&m), ["c", "b", "a"]);
+        assert_eq!(m.shown_pinned(), 0);
+        assert_eq!(m.selected(), 2);
+    }
+
+    #[test]
+    fn pinning_needs_ctrl_and_an_open_history_with_a_clip() {
+        let mut m = open_with(&["a"]);
+        assert!(m.go(press(Key::Pin)).is_empty());
+        assert!(!m.clips()[0].pinned);
+        let mut m = with(&["a"]);
+        assert!(pin_selected(&mut m).is_empty());
+        let mut m = Machine::default();
+        m.go(Event::Opened(None));
+        assert!(pin_selected(&mut m).is_empty());
+    }
+
+    #[test]
+    fn pins_stay_on_top_while_searching_and_numbering_follows() {
+        let mut m = open_with(&["ax", "ay", "az"]); // az, ay, ax
+        m.go(press(Key::Down));
+        m.go(press(Key::Down));
+        pin_selected(&mut m); // ax pinned
+        type_text(&mut m, "a");
+        assert_eq!(shown(&m), ["ax", "az", "ay"]);
+        let fx = m.go(chord(Key::Digit(1), false, true, false));
+        assert!(matches!(fx.last(), Some(Effect::Paste { clip, .. }) if clip.text == "ax"));
+    }
+
+    #[test]
+    fn pasting_a_clip_keeps_a_pin_in_the_pinned_section() {
+        let mut m = open_with(&["a", "b", "c"]);
+        m.go(press(Key::Down));
+        pin_selected(&mut m); // b pinned
+        m.go(press(Key::Down)); // c
+        m.go(press(Key::Enter));
+        m.go(Event::Opened(Some(APP)));
+        assert_eq!(shown(&m), ["b", "c", "a"]);
+        assert_eq!(m.shown_pinned(), 1);
+    }
+
+    #[test]
+    fn a_re_copied_pinned_clip_stays_pinned() {
+        let mut m = open_with(&["a", "b"]);
+        m.go(press(Key::Down));
+        pin_selected(&mut m); // a pinned
+        m.go(copy(9, "a"));
+        assert!(m.clips()[0].pinned);
+        assert_eq!(m.shown_pinned(), 1);
+    }
+
+    #[test]
+    fn a_pin_is_never_pushed_out_by_the_cap() {
+        let mut m = many(100);
+        m.go(Event::Opened(None));
+        for _ in 0..99 {
+            m.go(press(Key::Down));
+        }
+        assert_eq!(m.shown()[m.selected()].text, "clip 0");
+        pin_selected(&mut m);
+        m.go(copy(1000, "n1"));
+        m.go(copy(1001, "n2"));
+        assert_eq!(m.clips().len(), 101);
+        assert!(m.clips().iter().any(|c| c.text == "clip 0" && c.pinned));
+        assert!(!m.clips().iter().any(|c| c.text == "clip 1"));
+    }
+
+    #[test]
+    fn unpinning_an_old_clip_into_a_full_history_drops_the_oldest_unpinned() {
+        let mut m = many(100);
+        m.go(Event::Opened(None));
+        for _ in 0..99 {
+            m.go(press(Key::Down));
+        }
+        pin_selected(&mut m); // clip 0, the oldest
+        m.go(copy(1000, "newest")); // 100 unpinned plus the pin
+        assert_eq!(m.clips().len(), 101);
+        m.go(Event::Opened(None));
+        assert_eq!(m.shown()[0].text, "clip 0");
+        pin_selected(&mut m); // unpin: 101 unpinned, so the oldest of them goes
+        assert_eq!(m.clips().len(), 100);
+        assert!(!m.clips().iter().any(|c| c.text == "clip 0"));
+    }
+
+    #[test]
+    fn ctrl_delete_deletes_the_selected_clip_pinned_or_not() {
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
+        m.go(press(Key::Down));
+        let fx = delete_selected(&mut m);
+        assert_eq!(fx, [Effect::Save, Effect::Redraw]);
+        assert_eq!(texts(&m), ["c", "a"]);
+        assert_eq!(m.selected(), 1);
+        pin_selected(&mut m);
+        assert_eq!(shown(&m), ["a", "c"]);
+        delete_selected(&mut m);
+        assert_eq!(texts(&m), ["c"]);
+        assert_eq!(m.selected(), 0);
+    }
+
+    #[test]
+    fn delete_needs_ctrl_and_something_selected() {
+        let mut m = open_loaded(&["a"]);
+        assert!(m.go(press(Key::Delete)).is_empty());
+        assert_eq!(texts(&m), ["a"]);
+        delete_selected(&mut m);
+        assert!(m.clips().is_empty());
+        assert!(delete_selected(&mut m).is_empty());
+    }
+
+    #[test]
+    fn delete_acts_on_the_filtered_list() {
+        let mut m = open_loaded(&["apple", "banana", "apricot"]);
+        type_text(&mut m, "ap");
+        m.go(press(Key::Down)); // apple
+        delete_selected(&mut m);
+        assert_eq!(texts(&m), ["apricot", "banana"]);
+    }
+
+    #[test]
+    fn changes_are_saved_once_the_store_is_read() {
+        let mut m = many(3);
+        m.go(Event::Opened(None));
+        assert_eq!(pin_selected(&mut m), [Effect::Save, Effect::Redraw]);
+        assert_eq!(delete_selected(&mut m), [Effect::Save, Effect::Redraw]);
+        assert_eq!(m.go(Event::Clear), [Effect::Save, Effect::Redraw]);
+    }
+
+    #[test]
+    fn clear_deletes_every_unpinned_clip_and_keeps_the_pins() {
+        let mut m = open_loaded(&["a", "b", "c", "d"]); // d, c, b, a
+        m.go(press(Key::Down));
+        pin_selected(&mut m); // c, now first of c, d, b, a
+        for _ in 0..3 {
+            m.go(press(Key::Down));
+        }
+        pin_selected(&mut m); // a
+        let fx = m.go(Event::Clear);
+        assert_eq!(fx, [Effect::Save, Effect::Redraw]);
+        assert_eq!(shown(&m), ["c", "a"]);
+        assert!(m.clips().iter().all(|c| c.pinned));
+        assert_eq!(m.selected(), 0);
+        assert!(m.is_open(), "no confirmation, and the History stays open");
+    }
+
+    #[test]
+    fn clear_clears_the_unpinned_even_while_searching_and_does_nothing_when_none() {
+        let mut m = open_loaded(&["ax", "by"]);
+        type_text(&mut m, "a");
+        m.go(Event::Clear);
+        assert!(m.clips().is_empty());
+        assert!(m.go(Event::Clear).is_empty());
+        let mut m = open_loaded(&["a"]);
+        pin_selected(&mut m);
+        assert!(m.go(Event::Clear).is_empty());
+    }
+
+    #[test]
+    fn clear_works_while_closed_too() {
+        let mut m = with_loaded(&["a"]);
+        m.go(Event::Clear);
+        assert!(m.clips().is_empty());
+    }
+
+    #[test]
+    fn the_right_click_menu_acts_on_a_clip_by_id() {
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
+        let b = m.clips()[1].id;
+        m.go(Event::ClipAction { id: b, action: Action::TogglePin });
+        assert_eq!(shown(&m), ["b", "c", "a"]);
+        let fx = m.go(Event::ClipAction { id: b, action: Action::PastePlain });
+        assert!(matches!(fx.last(), Some(Effect::Paste { clip, plain: true, .. }) if clip.text == "b"));
+
+        let mut m = open_loaded(&["a", "b", "c"]);
+        let a = m.clips()[2].id;
+        let fx = m.go(Event::ClipAction { id: a, action: Action::Paste });
+        assert!(matches!(fx.last(), Some(Effect::Paste { clip, plain: false, .. }) if clip.text == "a"));
+
+        let mut m = open_loaded(&["a", "b", "c"]);
+        let c = m.clips()[0].id;
+        m.go(Event::ClipAction { id: c, action: Action::Delete });
+        assert_eq!(texts(&m), ["b", "a"]);
+    }
+
+    #[test]
+    fn a_menu_action_on_a_vanished_clip_or_a_closed_history_does_nothing() {
+        let mut m = open_loaded(&["a"]);
+        let a = m.clips()[0].id;
+        m.go(Event::ClipAction { id: a, action: Action::Delete });
+        assert!(m.go(Event::ClipAction { id: a, action: Action::Paste }).is_empty());
+
+        let mut m = open_loaded(&["a"]);
+        let a = m.clips()[0].id;
+        m.go(Event::Deactivated);
+        assert!(m.go(Event::ClipAction { id: a, action: Action::TogglePin }).is_empty());
+        assert!(!m.clips()[0].pinned);
+    }
+
+    #[test]
+    fn deleting_a_clip_above_keeps_the_same_clip_selected() {
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
+        m.go(press(Key::Down));
+        m.go(press(Key::Down)); // a
+        let c = m.clips()[0].id;
+        m.go(Event::ClipAction { id: c, action: Action::Delete });
+        assert_eq!(m.shown()[m.selected()].text, "a");
+    }
+
+    #[test]
+    fn delete_and_clear_wait_for_the_stored_history() {
+        let mut m = open_with(&["a", "b"]); // not loaded
+        assert_eq!(delete_selected(&mut m), [Effect::Refused(Refusal::NotLoaded)]);
+        assert_eq!(m.go(Event::Clear), [Effect::Refused(Refusal::NotLoaded)]);
+        let b = m.clips()[0].id;
+        assert_eq!(m.go(Event::ClipAction { id: b, action: Action::Delete }), [Effect::Refused(Refusal::NotLoaded)]);
+        assert_eq!(texts(&m), ["b", "a"]);
+        // After the load they work, and a loaded Clip is not brought back.
+        m.go(Event::Loaded(vec![saved("old", 1, false)]));
+        delete_selected(&mut m);
+        assert_eq!(texts(&m), ["a", "old"]);
+    }
+
+    #[test]
+    fn pins_stop_at_the_budget_the_store_can_read() {
+        let mut m = Machine::default();
+        let pins: Vec<Clip> = (0..store::MAX_PINNED as u64).map(|i| saved(&format!("pin {i}"), i, true)).collect();
+        m.go(Event::Loaded(pins));
+        m.go(copy(1, "one more"));
+        let id = m.clips()[0].id;
+        assert_eq!(m.go(Event::Opened(None)), [Effect::Redraw]);
+        let fx = m.go(Event::ClipAction { id, action: Action::TogglePin });
+        assert_eq!(fx, [Effect::Refused(Refusal::TooManyPins)]);
+        assert!(!m.clips()[0].pinned);
+        // Select it and press Ctrl+P: refused the same way.
+        m.go(Event::Key(Key::Down, Mods::default()));
+        for _ in 0..store::MAX_PINNED {
+            m.go(Event::Key(Key::Down, Mods::default()));
+        }
+        assert_eq!(pin_selected(&mut m), [Effect::Refused(Refusal::TooManyPins)]);
+        // Unpinning one frees a place.
+        let first_pin = m.shown()[0].id;
+        m.go(Event::ClipAction { id: first_pin, action: Action::TogglePin });
+        assert_eq!(m.go(Event::ClipAction { id, action: Action::TogglePin }), [Effect::Save, Effect::Redraw]);
+        assert!(m.clips().iter().find(|c| c.id == id).unwrap().pinned);
+    }
+
+    #[test]
+    fn a_right_click_selects_the_row_and_redraws_only_when_it_moves() {
+        let mut m = open_with(&["a", "b", "c"]); // c, b, a
+        let a = m.clips()[2].id;
+        assert_eq!(m.go(Event::Select(a)), [Effect::Redraw]);
+        assert_eq!(m.shown()[m.selected()].text, "a");
+        assert!(m.go(Event::Select(a)).is_empty());
+        // Closed History or a vanished Clip: nothing.
+        assert!(m.go(Event::Select(ClipId(999))).is_empty());
+        m.go(Event::Deactivated);
+        assert!(m.go(Event::Select(a)).is_empty());
     }
 }
