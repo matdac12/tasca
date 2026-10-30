@@ -24,7 +24,7 @@ const ALPHA: u8 = 245;
 const POINTER_GAP: f32 = 8.0;
 
 /// Work area of a monitor, in pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Work {
     pub left: i32,
     pub top: i32,
@@ -39,6 +39,13 @@ pub fn place(pointer: (i32, i32), gap: i32, size: (i32, i32), work: Work) -> (i3
     let x = (pointer.0 + gap).min(work.right - size.0).max(work.left);
     let y = (pointer.1 + gap).min(work.bottom - size.1).max(work.top);
     (x, y)
+}
+
+/// Position and size of the window for `rows` Clips: sized by `draw`, then
+/// placed with `place`. Pure; called again whenever the Clip count changes.
+pub fn frame(pointer: (i32, i32), gap: i32, rows: usize, scale: f32, work: Work) -> ((i32, i32), (i32, i32)) {
+    let size = super::draw::size_px(rows, scale);
+    (place(pointer, gap, size, work), size)
 }
 
 /// The monitor under the pointer: pointer, work area and DPI.
@@ -142,8 +149,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_ACTIVATE => {
                 if wp.0 & 0xffff == WA_INACTIVE as usize {
                     super::dispatch(Event::Deactivated);
+                    return LRESULT(0);
                 }
-                LRESULT(0)
+                // Activated: the default handler gives this window the keyboard focus.
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             // Alt is usually still held from Alt+V, so Enter arrives as a SYSKEYDOWN.
             WM_KEYDOWN | WM_SYSKEYDOWN => match key_of(wp.0 as u16) {
@@ -189,6 +198,18 @@ mod tests {
     #[test]
     fn a_window_larger_than_the_work_area_sticks_to_its_top_left() {
         assert_eq!(place((10, 10), 8, (400, 2000), WORK), (18, 0));
+    }
+
+    #[test]
+    fn growing_rows_near_the_bottom_edge_move_the_window_up() {
+        let work = Work { left: 0, top: 0, right: 1920, bottom: 1040 };
+        let (at1, size1) = frame((100, 900), 8, 1, 1.0, work);
+        let (at9, size9) = frame((100, 900), 8, 9, 1.0, work);
+        assert_eq!((at1, size1), ((108, 908), (400, 56)));
+        assert!(at9.1 + size9.1 <= work.bottom, "{at9:?} {size9:?}");
+        assert!(at9.1 < at1.1);
+        // Shrinking again returns to the pointer.
+        assert_eq!(frame((100, 900), 8, 1, 1.0, work).0, at1);
     }
 
     #[test]

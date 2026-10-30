@@ -1,13 +1,15 @@
-//! Paste-back. The state machine says `Paste { clip, target }`; this module
-//! does the Win32 part, in the order the spec fixes: write the Clip (the
-//! window is the clipboard owner, the write's sequence number goes back as
-//! `OwnWrite`), restore the target, then, after a short timer so the target
-//! has taken focus, release held Alt/Ctrl/Shift/Win and send a plain Ctrl+V.
+//! Paste-back. The state machine says `Paste { clip, target }` (or `Copy`);
+//! this module does the Win32 part, in the order the spec fixes: write the Clip
+//! (the window is the clipboard owner; the write's sequence number, taken while
+//! the clipboard is still open, goes back as `OwnWrite`), restore the target,
+//! then, after a short timer so the target has taken focus, release held
+//! Alt/Ctrl/Shift/Win and send a plain Ctrl+V.
 //!
 //! Nothing here sleeps and nothing here runs inside a `RefCell` borrow: the
-//! caller (`dispatch`) has already dropped it.
+//! caller (`dispatch`) has already dropped it. A busy clipboard is retried on a
+//! timer, a bounded number of times.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
 use windows::Win32::System::DataExchange::{
@@ -27,60 +29,119 @@ use super::clip::Clip;
 use super::state::{Event, Target};
 use crate::log::log;
 
-/// Timer id on the resident window.
+/// Timer ids on the resident window.
 pub const T_KEYS: usize = 0x4802;
+pub const T_WRITE: usize = 0x4803;
 /// Between `SetForegroundWindow` and the keystrokes.
 const KEYS_DELAY_MS: u32 = 40;
+const WRITE_RETRY_MS: u32 = 25;
+const MAX_WRITE_TRIES: u32 = 12;
+
+/// A write waiting for the clipboard to be free.
+struct Job {
+    clip: Clip,
+    /// `None` = copy only.
+    target: Option<Target>,
+    tries: u32,
+    owner: isize,
+}
 
 thread_local! {
+    static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
     /// The window that should have focus when the keys go out.
     static PENDING: Cell<Option<isize>> = const { Cell::new(None) };
 }
 
-/// Put `clip` on the clipboard; the sequence number after the write.
-fn write(owner: HWND, clip: &Clip) -> Option<u32> {
+enum Written {
+    /// Sequence number of this write, taken while the clipboard was still ours.
+    Done(u32),
+    /// Another app has the clipboard open: try again later.
+    Busy,
+    Failed,
+}
+
+fn write(owner: HWND, clip: &Clip) -> Written {
     let units: Vec<u16> = clip.text.encode_utf16().chain(Some(0)).collect();
     unsafe {
-        let mem = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2).ok()?;
+        let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) else { return Written::Failed };
         let p = GlobalLock(mem) as *mut u16;
         if p.is_null() {
             let _ = GlobalFree(Some(mem));
-            return None;
+            return Written::Failed;
         }
         std::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
         let _ = GlobalUnlock(mem);
         if OpenClipboard(Some(owner)).is_err() {
             let _ = GlobalFree(Some(mem));
-            return None;
+            return Written::Busy;
         }
         let _ = EmptyClipboard();
         // On success the clipboard owns `mem`.
         let set = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(mem.0)));
+        // Nobody else can change the clipboard while it is open: this is ours.
+        let seq = GetClipboardSequenceNumber();
         if set.is_err() {
             let _ = GlobalFree(Some(mem));
         }
         let _ = CloseClipboard();
-        set.ok()?;
-        Some(GetClipboardSequenceNumber())
+        match set {
+            Ok(_) => Written::Done(seq),
+            Err(_) => Written::Failed,
+        }
     }
 }
 
 /// Copy-only: the Clip is on the clipboard and nothing is typed.
-pub fn copy(owner: HWND, clip: &Clip) {
-    match write(owner, clip) {
-        Some(seq) => super::dispatch(Event::OwnWrite(seq)),
-        None => log("history: could not write the clipboard"),
+pub fn copy(resident: HWND, owner: HWND, clip: &Clip) {
+    start(resident, owner, clip, None);
+}
+
+/// Write the Clip, then bring `target` back and schedule the keystrokes. The
+/// History window is already hidden.
+pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target) {
+    start(resident, owner, clip, Some(target));
+}
+
+fn start(resident: HWND, owner: HWND, clip: &Clip, target: Option<Target>) {
+    // A newer paste replaces one still waiting.
+    JOB.with(|j| *j.borrow_mut() = Some(Job { clip: clip.clone(), target, tries: 0, owner: owner.0 as isize }));
+    attempt(resident);
+}
+
+/// `WM_TIMER` with `T_WRITE`.
+pub fn on_write_retry(resident: HWND) {
+    attempt(resident);
+}
+
+fn attempt(resident: HWND) {
+    unsafe {
+        let _ = KillTimer(Some(resident), T_WRITE);
+    }
+    let Some(job) = JOB.with(|j| j.borrow_mut().take()) else { return };
+    match write(HWND(job.owner as *mut _), &job.clip) {
+        Written::Done(seq) => {
+            super::dispatch(Event::OwnWrite(seq));
+            if let Some(target) = job.target {
+                restore_and_schedule_keys(resident, target);
+            }
+        }
+        Written::Busy if more_tries(job.tries) => {
+            JOB.with(|j| *j.borrow_mut() = Some(Job { tries: job.tries + 1, ..job }));
+            unsafe {
+                SetTimer(Some(resident), T_WRITE, WRITE_RETRY_MS, None);
+            }
+        }
+        Written::Busy => log("history: the clipboard stayed busy, nothing pasted"),
+        Written::Failed => log("history: could not write the clipboard, nothing pasted"),
     }
 }
 
-/// Write the Clip, then bring `target` back and schedule the keystrokes on
-/// `resident`'s timer. The History window is already hidden.
-pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target) {
-    let Some(seq) = write(owner, clip) else {
-        log("history: could not write the clipboard, nothing pasted");
-        return;
-    };
-    super::dispatch(Event::OwnWrite(seq));
+/// Whether a write that failed after `tries` retries may be retried again.
+fn more_tries(tries: u32) -> bool {
+    tries < MAX_WRITE_TRIES
+}
+
+fn restore_and_schedule_keys(resident: HWND, target: Target) {
     let hwnd = HWND(target.0 as *mut _);
     unsafe {
         if !IsWindow(Some(hwnd)).as_bool() {
@@ -91,7 +152,7 @@ pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target) {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         if !SetForegroundWindow(hwnd).as_bool() {
-            log("history: SetForegroundWindow refused, pasting anyway");
+            log("history: SetForegroundWindow refused");
         }
         PENDING.set(Some(target.0));
         SetTimer(Some(resident), T_KEYS, KEYS_DELAY_MS, None);
@@ -166,5 +227,12 @@ mod tests {
         assert_eq!(&keys[..2], [(VK_LMENU, true), (VK_LSHIFT, true)]);
         assert_eq!(keys[2], (VK_CONTROL, false));
         assert_eq!(keys.len(), 6);
+    }
+
+    #[test]
+    fn a_busy_clipboard_is_retried_a_bounded_number_of_times() {
+        assert!(more_tries(0));
+        assert!(more_tries(MAX_WRITE_TRIES - 1));
+        assert!(!more_tries(MAX_WRITE_TRIES));
     }
 }

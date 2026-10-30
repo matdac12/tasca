@@ -29,7 +29,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_HOTKEY, WM
 
 use crate::hotkey::Slot;
 use crate::log::log;
-use crate::proto::WM_SHOW_HISTORY;
+use crate::proto::{WM_HISTORY_READ, WM_SHOW_HISTORY};
 use state::{Effect, Event, Machine, Target};
 
 /// Not exported by the `windows` features we enable.
@@ -42,8 +42,12 @@ struct Shell {
     window: HWND,
     machine: Machine,
     scale: f32,
-    /// Where the window sits while open.
-    origin: (i32, i32),
+    /// Where the window was opened: the pointer, the gap below-right of it and
+    /// the monitor's work area. The window is placed from these on every size
+    /// change, so growing rows never fall off the screen.
+    pointer: (i32, i32),
+    gap: i32,
+    work: window::Work,
 }
 
 thread_local! {
@@ -67,7 +71,7 @@ pub fn create(resident: HWND) -> Result<()> {
     let window = window::create()?;
     SHELL.with(|c| {
         *c.borrow_mut() =
-            Some(Shell { resident, window, machine: Machine::default(), scale: 1.0, origin: (0, 0) })
+            Some(Shell { resident, window, machine: Machine::default(), scale: 1.0, pointer: (0, 0), gap: 0, work: window::Work::default() })
     });
     record::start(resident);
     Ok(())
@@ -88,7 +92,8 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     let _ = lp;
     match msg {
         WM_CLIPBOARDUPDATE => record::on_update(hwnd),
-        WM_TIMER if wp.0 == record::T_RETRY => record::on_retry(hwnd),
+        WM_HISTORY_READ => record::on_read(hwnd),
+        WM_TIMER if wp.0 == paste::T_WRITE => paste::on_write_retry(hwnd),
         WM_TIMER if wp.0 == paste::T_KEYS => paste::on_keys(hwnd),
         WM_HOTKEY if Slot::from_id(wp.0 as i32) == Some(Slot::History) => toggle(),
         WM_SHOW_HISTORY => open(),
@@ -118,12 +123,14 @@ fn open() {
     let target = (!foreground.is_invalid() && foreground != window).then_some(Target(foreground.0 as isize));
     let (pointer, work, dpi) = window::pointer_monitor();
     let scale = dpi as f32 / 96.0;
-    let size = draw::size_px(rows, scale);
-    let origin = window::place(pointer, window::pointer_gap(scale), size, work);
+    let gap = window::pointer_gap(scale);
     with(|s| {
         s.scale = scale;
-        s.origin = origin;
+        s.pointer = pointer;
+        s.gap = gap;
+        s.work = work;
     });
+    let (origin, _) = window::frame(pointer, gap, rows, scale, work);
     log(format!("history: open at {origin:?}, dpi {dpi}, {rows} clips, target {target:?}"));
     dispatch(Event::Opened(target));
 }
@@ -143,7 +150,8 @@ fn apply(effect: Effect) {
         Effect::MoveToTop(id) => log(format!("history: clip {} to the top", id.0)),
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
         Effect::Redraw => {
-            if let Some((origin, size)) = with(|s| (s.origin, draw::size_px(s.machine.clips().len(), s.scale))) {
+            let frame = with(|s| window::frame(s.pointer, s.gap, s.machine.clips().len(), s.scale, s.work));
+            if let Some((origin, size)) = frame {
                 if !window::show(window, origin, size) {
                     dispatch(Event::Deactivated);
                 }
@@ -151,7 +159,7 @@ fn apply(effect: Effect) {
         }
         Effect::Close => window::hide(window),
         Effect::Paste { clip, target } => paste::paste(resident, window, &clip, target),
-        Effect::Copy { clip } => paste::copy(window, &clip),
+        Effect::Copy { clip } => paste::copy(resident, window, &clip),
     }
 }
 
