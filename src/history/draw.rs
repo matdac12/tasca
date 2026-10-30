@@ -43,6 +43,9 @@ const NUM_W: f32 = 12.0;
 /// The lens glyph's box and its gap to the search text.
 const LENS_W: f32 = 13.0;
 const LENS_GAP: f32 = 8.0;
+/// The pin glyph's box and its gap to the type text.
+const PIN_W: f32 = 10.0;
+const PIN_GAP: f32 = 4.0;
 /// Rows that carry an Alt+number.
 const NUMBERED: usize = 9;
 
@@ -50,6 +53,8 @@ const NUMBERED: usize = 9;
 pub struct RowView {
     pub title: String,
     pub sub: String,
+    /// Shows the pin glyph before `sub`.
+    pub pinned: bool,
 }
 
 /// What one frame shows.
@@ -281,6 +286,16 @@ unsafe fn draw(rt: &ID2D1DCRenderTarget, fonts: &Fonts, v: &View) -> Result<()> 
     }
 }
 
+/// A small pushpin (the mockup's 10 DIP glyph) with its left edge at `x` and
+/// centred on `cy`: a round head and a slanted needle.
+unsafe fn draw_pin(rt: &ID2D1DCRenderTarget, x: f32, cy: f32, b: &ID2D1SolidColorBrush) {
+    unsafe {
+        let head = Vector2 { X: x + 6.4, Y: cy - 2.6 };
+        rt.FillEllipse(&D2D1_ELLIPSE { point: head, radiusX: 2.9, radiusY: 2.9 }, b);
+        rt.DrawLine(Vector2 { X: x + 5.0, Y: cy - 1.2 }, Vector2 { X: x + 0.6, Y: cy + 4.0 }, b, 1.2, None);
+    }
+}
+
 /// Labels and rows (or the empty state), in list-viewport coordinates.
 unsafe fn draw_list(
     rt: &ID2D1DCRenderTarget,
@@ -333,7 +348,13 @@ unsafe fn draw_list(
             }
             let mx = x0 + SIDE + NUM_W + SIDE;
             text(&row.title, &fonts.name, rect(mx, y + 7.0, x1 - SIDE, y + 23.0), &t1);
-            text(&row.sub, &fonts.sub, rect(mx, y + 23.0, x1 - SIDE, y + 37.0), &t2);
+            let sub_x = if row.pinned {
+                draw_pin(rt, mx, y + 30.0, &t2);
+                mx + PIN_W + PIN_GAP
+            } else {
+                mx
+            };
+            text(&row.sub, &fonts.sub, rect(sub_x, y + 23.0, x1 - SIDE, y + 37.0), &t2);
         }
         Ok(())
     }

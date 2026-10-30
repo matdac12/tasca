@@ -71,6 +71,12 @@ pub fn type_line(text: &str, now_ms: u64, copied_ms: u64) -> String {
     format!("{} · {}", kind_label(text), age(now_ms, copied_ms))
 }
 
+/// The grey line under a pinned Clip's title: its type and no age (a pin is
+/// kept, not recent).
+pub fn pinned_line(text: &str) -> String {
+    kind_label(text).to_string()
+}
+
 /// The footer's right side.
 pub fn count_label(clips: usize) -> String {
     if clips == 1 { "1 Clip".to_string() } else { format!("{clips} Clips") }
@@ -145,6 +151,12 @@ mod tests {
         assert_eq!(type_line("hello", now, now - 2 * MIN_MS), "Text · 2 min");
         assert_eq!(type_line("https://example.com", now, now - 6 * MIN_MS), "Link · 6 min");
         assert_eq!(type_line("x", now, now - 3 * HOUR_MS), "Text · 3 h");
+    }
+
+    #[test]
+    fn a_pinned_line_has_the_type_and_no_age() {
+        assert_eq!(pinned_line("hello"), "Text");
+        assert_eq!(pinned_line("https://example.com"), "Link");
     }
 
     #[test]
