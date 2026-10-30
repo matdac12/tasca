@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">Tasca icon prototype 4: Clip</title>
+  <defs><linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FAF6EC"/><stop offset="1" stop-color="#E9E0CE"/></linearGradient><linearGradient id="dtile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4A4036"/><stop offset="1" stop-color="#2B2520"/></linearGradient><linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.4"/><stop offset=".6" stop-color="#fff" stop-opacity="0"/></linearGradient><linearGradient id="rust" x1="0" y1="0" x2="1" y2="0.6"><stop offset="0" stop-color="#C06B44"/><stop offset="1" stop-color="#9A4A2B"/></linearGradient><linearGradient id="dark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4A4036"/><stop offset="1" stop-color="#2B2520"/></linearGradient></defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#tile)"/>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#gloss)"/><rect x="8.75" y="8.75" width="238.5" height="238.5" rx="53.25" fill="none" stroke="#000" stroke-opacity="0.1" stroke-width="1.5"/>
+  <rect x="78" y="80" width="100" height="120" rx="14" fill="url(#rust)" transform="rotate(-8 128 140)"/><path d="M92 176V84a36 36 0 0 1 72 0V168a24 24 0 0 1-48 0V104" stroke="url(#dark)" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" fill="none" transform="rotate(14 128 128)"/>
+</svg>

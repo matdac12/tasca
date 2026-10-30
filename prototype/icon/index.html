@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Tasca icon prototypes (throwaway)</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:0;color:#222}
+.card{margin:0 0 18px;border:1px solid #8884;border-radius:12px;overflow:hidden}
+.card h3{margin:0;padding:10px 14px 2px;font-size:15px}
+.card p{margin:0;padding:0 14px 10px;color:#777}
+.row{display:flex;align-items:flex-end;gap:22px;padding:14px}
+.row.l{background:#f3f3f3}.row.d{background:#202020}
+.row figure{margin:0;text-align:center;font-size:10px;color:#888}
+.row img{display:block;margin:0 auto 4px}
+</style></head><body>
+<div id="o"></div>
+<script>
+const base = window.ICON_BASE || '';
+const icons = [
+ ['icon-1-pocket.svg','1 · Pocket','A patch pocket with a stitched hem and a page peeking out: the name, "tasca", literally.'],
+ ['icon-2-edge.svg','2 · Shelf at the edge','The screen edge (dark strip) with the Shelf sliding out of it: what Tasca does.'],
+ ['icon-3-stack.svg','3 · Stack','Three cards fanned in the palette: the parked Stack of files.'],
+ ['icon-4-clip.svg','4 · Clip','A paperclip holding a sheet: "keep this for later", and it fits the clipboard History.'],
+ ['icon-5-drop.svg','5 · Drop into the tray','Dark tile, an arrow dropping into an open tray: drag in, park, drag out.'],
+];
+o.innerHTML = icons.map(([f,t,d]) => `<div class="card"><h3>${t}</h3><p>${d}</p>`+
+ ['l','d'].map(k=>`<div class="row ${k}">`+[256,48,32,16].map(s=>`<figure><img src="${base}${f}" width="${s}" height="${s}">${s}</figure>`).join('')+'</div>').join('')+'</div>').join('');
+</script></body></html>
