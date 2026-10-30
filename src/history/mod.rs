@@ -382,7 +382,7 @@ mod tests {
     fn hover_follows_the_row_under_a_still_pointer() {
         let l = Layout::new(1.0, 20, 0, false);
         let origin = (1000, 200);
-        // Pointer over the list's first row (after the 21 DIP label), then the same
+        // Pointer over the list's first row (after the 26 DIP label), then the same
         // pointer after the list scrolled by two rows.
         let pointer = (origin.0 + 200, origin.1 + l.list_top() as i32 + 30);
         assert_eq!(hover_at(&l, pointer, origin, 0.0), Some(0));
