@@ -2,28 +2,73 @@
 //! clipboard, file or thread; the shell (`mod.rs`) feeds it events and carries
 //! out the effects it returns.
 
-use super::clip::{Clip, ClipId};
+use std::sync::Arc;
+
+use super::clip::{Clip, ClipId, Content};
+use super::formats::{self, Kind, Offered};
 use super::search;
 use super::store;
-
-/// A single copy larger than this is skipped (spec: 10 MB).
-const MAX_CLIP_BYTES: usize = 10 * 1024 * 1024;
 
 /// The window a paste goes back to (an `HWND` as an integer, so this stays pure).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Target(pub isize);
 
 /// What one clipboard update offered, as read by `record`.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Capture {
     /// `GetClipboardSequenceNumber` at read time.
     pub seq: u32,
     /// `CF_UNICODETEXT`, if the copy offered it.
     pub text: Option<String>,
+    /// `HTML Format` and `Rich Text Format`, if offered.
+    pub html: Option<String>,
+    pub rtf: Option<String>,
+    /// The picture, already converted to PNG on the reader's worker.
+    pub image: Option<CapturedImage>,
+    /// The `CF_HDROP` paths.
+    pub files: Option<Vec<String>>,
+    /// A format the copy offered was too big to read at all: skip the whole copy.
+    pub oversized: bool,
     /// The clipboard's owner was the History window: one of our own writes.
     /// The sequence number alone is not enough (the update can report a later
     /// number than the one taken at write time).
     pub own: bool,
+}
+
+/// A copied picture as the reader hands it over.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CapturedImage {
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+    /// `image::pixel_hash` of the pixels.
+    pub hash: u64,
+}
+
+impl Capture {
+    /// The Clip's text and content, by the kind rule: files, else text (with
+    /// its formats), else the image; anything else offered next to the winner
+    /// is dropped. `None`: nothing recordable. Blank text counts as absent.
+    fn into_parts(self) -> Option<(String, Content)> {
+        let text = self.text.filter(|t| !t.trim().is_empty());
+        let files = self.files.filter(|f| !f.is_empty());
+        let offered = Offered {
+            hdrop: files.is_some(),
+            text: text.is_some(),
+            html: self.html.is_some(),
+            rtf: self.rtf.is_some(),
+            dibv5: self.image.is_some(),
+            dib: false,
+        };
+        Some(match formats::choose_kind(&offered)? {
+            Kind::Files => (String::new(), Content::Files { paths: files? }),
+            Kind::Text { .. } => (text?, Content::Text { html: self.html, rtf: self.rtf }),
+            Kind::Image { .. } => {
+                let i = self.image?;
+                (String::new(), Content::Image { width: i.width, height: i.height, png: Arc::new(i.png), hash: i.hash })
+            }
+        })
+    }
 }
 
 /// The keys the History acts on. Typing arrives as `Event::Char`, not here.
@@ -127,6 +172,17 @@ pub enum Refusal {
     NotLoaded,
 }
 
+/// The sizes a Clip stores, for the 10 MB cap (an image counts as its PNG).
+fn stored_sizes(text: &str, content: &Content) -> Vec<usize> {
+    match content {
+        Content::Text { html, rtf } => {
+            vec![text.len(), html.as_ref().map_or(0, String::len), rtf.as_ref().map_or(0, String::len)]
+        }
+        Content::Image { png, .. } => vec![png.len()],
+        Content::Files { paths } => paths.iter().map(String::len).collect(),
+    }
+}
+
 #[derive(Default)]
 pub struct Machine {
     /// Newest first.
@@ -154,7 +210,7 @@ impl Machine {
     /// 1..9 and `selected` count in this list.
     pub fn shown(&self) -> Vec<&Clip> {
         let words = search::words(&self.query);
-        let mut shown: Vec<&Clip> = self.clips.iter().filter(|c| search::matches(&words, &c.text)).collect();
+        let mut shown: Vec<&Clip> = self.clips.iter().filter(|c| search::matches(&words, &c.search_text())).collect();
         // Pinned Clips first; the sort is stable, so each section stays newest first.
         shown.sort_by_key(|c| !c.pinned);
         shown
@@ -224,27 +280,32 @@ impl Machine {
         if capture.own || self.own_seq == Some(capture.seq) {
             return vec![Effect::Skip(Skip::OwnWrite)];
         }
-        let text = match capture.text {
-            Some(t) if !t.trim().is_empty() => t,
-            _ => return vec![Effect::Skip(Skip::NothingRecordable)],
+        if capture.oversized {
+            return vec![Effect::Skip(Skip::TooBig)];
+        }
+        let Some((text, content)) = capture.into_parts() else {
+            return vec![Effect::Skip(Skip::NothingRecordable)];
         };
-        if text.len() > MAX_CLIP_BYTES {
+        if !formats::within_cap(&stored_sizes(&text, &content)) {
             return vec![Effect::Skip(Skip::TooBig)];
         }
         let mut effects = Vec::new();
         let selected_id = self.shown().get(self.selected).map(|c| c.id);
-        match self.clips.iter().position(|c| c.text == text) {
+        let mut copy = Clip { id: ClipId(self.next_id), text, content, last_copied_ms: now_ms, pinned: false };
+        let key = copy.dup_key();
+        match self.clips.iter().position(|c| c.dup_key() == key) {
             Some(i) => {
-                let mut clip = self.clips.remove(i);
-                clip.last_copied_ms = now_ms;
-                effects.push(Effect::MoveToTop(clip.id));
-                self.clips.insert(0, clip);
+                // Same content: the old Clip keeps its id and pin, takes the newest formats.
+                let old = self.clips.remove(i);
+                copy.id = old.id;
+                copy.pinned = old.pinned;
+                effects.push(Effect::MoveToTop(copy.id));
+                self.clips.insert(0, copy);
             }
             None => {
-                let id = ClipId(self.next_id);
                 self.next_id += 1;
-                self.clips.insert(0, Clip { id, text, last_copied_ms: now_ms, pinned: false });
-                effects.push(Effect::Add(id));
+                effects.push(Effect::Add(copy.id));
+                self.clips.insert(0, copy);
             }
         }
         self.trim();
@@ -283,7 +344,7 @@ impl Machine {
         let selected_id = self.shown().get(self.selected).map(|c| c.id);
         let recorded = !self.clips.is_empty();
         for mut old in saved {
-            match self.clips.iter_mut().find(|c| c.text == old.text) {
+            match self.clips.iter_mut().find(|c| c.dup_key() == old.dup_key()) {
                 Some(same) => same.pinned |= old.pinned,
                 None => {
                     old.id = ClipId(self.next_id);
@@ -470,7 +531,7 @@ mod tests {
     }
 
     fn copy(seq: u32, text: &str) -> Event {
-        Event::Copied(Capture { seq, text: Some(text.to_string()), own: false })
+        Event::Copied(Capture { seq, text: Some(text.to_string()), ..Capture::default() })
     }
 
     fn texts(m: &Machine) -> Vec<&str> {
@@ -554,7 +615,7 @@ mod tests {
         let mut m = with(&["a"]);
         m.go(Event::OwnWrite(7));
         // The update reports a later number than the one taken at write time.
-        let ours = Capture { seq: 9, text: Some("b".into()), own: true };
+        let ours = Capture { seq: 9, text: Some("b".into()), own: true, ..Capture::default() };
         assert_eq!(m.go(Event::Copied(ours)), [Effect::Skip(Skip::OwnWrite)]);
         assert_eq!(texts(&m), ["a"]);
     }
@@ -570,9 +631,9 @@ mod tests {
     #[test]
     fn blank_missing_and_huge_text_is_not_recorded() {
         let mut m = Machine::default();
-        assert_eq!(m.go(Event::Copied(Capture { seq: 1, text: None, own: false })), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.go(Event::Copied(Capture { seq: 1, ..Capture::default() })), [Effect::Skip(Skip::NothingRecordable)]);
         assert_eq!(m.go(copy(2, " \r\n\t")), [Effect::Skip(Skip::NothingRecordable)]);
-        assert_eq!(m.go(copy(3, &"x".repeat(MAX_CLIP_BYTES + 1))), [Effect::Skip(Skip::TooBig)]);
+        assert_eq!(m.go(copy(3, &"x".repeat(formats::MAX_STORED + 1))), [Effect::Skip(Skip::TooBig)]);
         assert!(m.clips().is_empty());
     }
 
@@ -885,7 +946,7 @@ mod tests {
     }
 
     fn saved(text: &str, ms: u64, pinned: bool) -> Clip {
-        Clip { id: ClipId(900 + ms), text: text.into(), last_copied_ms: ms, pinned }
+        Clip::plain(ClipId(900 + ms), text.into(), ms, pinned)
     }
 
     fn many(n: usize) -> Machine {
@@ -1272,5 +1333,135 @@ mod tests {
         assert!(m.go(Event::Select(ClipId(999))).is_empty());
         m.go(Event::Deactivated);
         assert!(m.go(Event::Select(a)).is_empty());
+    }
+
+    // ---- formats, images, files ----
+
+    fn img(hash: u64) -> Option<CapturedImage> {
+        Some(CapturedImage { width: 2, height: 1, png: vec![hash as u8; 8], hash })
+    }
+
+    fn cap(seq: u32) -> Capture {
+        Capture { seq, ..Capture::default() }
+    }
+
+    fn paths(p: &[&str]) -> Option<Vec<String>> {
+        Some(p.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn excel_like_text_html_rtf_and_image_is_one_text_clip_with_its_formats() {
+        let mut m = Machine::default();
+        let c = Capture {
+            text: Some("1	2".into()),
+            html: Some("<table>".into()),
+            rtf: Some("{\rtf1}".into()),
+            image: img(1),
+            ..cap(1)
+        };
+        assert!(matches!(m.go(Event::Copied(c))[0], Effect::Add(_)));
+        let clip = &m.clips()[0];
+        assert_eq!(clip.text, "1	2");
+        assert_eq!(clip.content, Content::Text { html: Some("<table>".into()), rtf: Some("{\rtf1}".into()) });
+    }
+
+    #[test]
+    fn a_browser_image_is_an_image_clip_and_explorer_files_win_over_text() {
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { html: Some("<img>".into()), image: img(7), ..cap(1) }));
+        assert!(matches!(m.clips()[0].content, Content::Image { hash: 7, width: 2, height: 1, .. }));
+        assert_eq!(m.clips()[0].text, "");
+        m.go(Event::Copied(Capture { text: Some("a.txt".into()), files: paths(&["C:\\a.txt"]), image: img(8), ..cap(2) }));
+        assert_eq!(m.clips()[0].content, Content::Files { paths: vec!["C:\\a.txt".into()] });
+        assert_eq!(m.clips().len(), 2);
+    }
+
+    #[test]
+    fn nothing_recordable_when_only_formats_or_blank_text_come() {
+        let mut m = Machine::default();
+        assert_eq!(m.go(Event::Copied(Capture { html: Some("<b>".into()), ..cap(1) })), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.go(Event::Copied(Capture { text: Some(" ".into()), ..cap(2) })), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.go(Event::Copied(Capture { files: Some(vec![]), ..cap(3) })), [Effect::Skip(Skip::NothingRecordable)]);
+    }
+
+    #[test]
+    fn a_copy_with_a_format_too_big_to_read_is_skipped_whole() {
+        let mut m = Machine::default();
+        let c = Capture { text: Some("short".into()), oversized: true, ..cap(1) };
+        assert_eq!(m.go(Event::Copied(c)), [Effect::Skip(Skip::TooBig)]);
+        assert!(m.clips().is_empty());
+    }
+
+    #[test]
+    fn the_cap_counts_every_kept_format_and_an_image_as_its_png() {
+        let mut m = Machine::default();
+        let half = "x".repeat(formats::MAX_STORED / 2 + 1);
+        let c = Capture { text: Some(half.clone()), html: Some(half), ..cap(1) };
+        assert_eq!(m.go(Event::Copied(c)), [Effect::Skip(Skip::TooBig)]);
+        let big = CapturedImage { width: 1, height: 1, png: vec![0; formats::MAX_STORED + 1], hash: 1 };
+        assert_eq!(m.go(Event::Copied(Capture { image: Some(big), ..cap(2) })), [Effect::Skip(Skip::TooBig)]);
+        assert!(m.clips().is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_takes_the_newest_formats_and_keeps_its_pin() {
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { text: Some("same".into()), html: Some("<i>".into()), ..cap(1) }));
+        m.go(Event::Loaded(vec![]));
+        let id = m.clips()[0].id;
+        m.go(Event::Opened(Some(APP)));
+        m.go(Event::Key(Key::Pin, Mods { ctrl: true, ..Mods::default() }));
+        m.go(Event::Copied(Capture { text: Some("other".into()), ..cap(2) }));
+        let fx = m.go(Event::Copied(Capture { text: Some("same".into()), html: Some("<b>".into()), rtf: Some("r".into()), ..cap(3) }));
+        assert!(fx.contains(&Effect::MoveToTop(id)));
+        assert_eq!(m.clips().len(), 2);
+        let c = m.clips().iter().find(|c| c.id == id).unwrap();
+        assert!(c.pinned);
+        assert_eq!(c.content, Content::Text { html: Some("<b>".into()), rtf: Some("r".into()) });
+    }
+
+    #[test]
+    fn images_compare_on_pixels_and_files_on_a_case_insensitive_path_list() {
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { image: img(5), ..cap(1) }));
+        m.go(Event::Copied(Capture { image: img(5), ..cap(2) }));
+        m.go(Event::Copied(Capture { image: img(6), ..cap(3) }));
+        m.go(Event::Copied(Capture { files: paths(&["C:\\Docs\\A.txt"]), ..cap(4) }));
+        m.go(Event::Copied(Capture { files: paths(&["c:\\docs\\a.TXT"]), ..cap(5) }));
+        m.go(Event::Copied(Capture { files: paths(&["c:\\docs\\a.txt", "c:\\b"]), ..cap(6) }));
+        assert_eq!(m.clips().len(), 4);
+        // text and files with the same words are different Clips
+        m.go(Event::Copied(Capture { text: Some("c:\\docs\\a.txt".into()), ..cap(7) }));
+        assert_eq!(m.clips().len(), 5);
+    }
+
+    #[test]
+    fn file_names_are_searchable_and_images_never_match() {
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { image: img(1), ..cap(1) }));
+        m.go(Event::Copied(Capture { files: paths(&["C:\\Users\\M\\Report Q3.pdf", "D:\\x.txt"]), ..cap(2) }));
+        m.go(Event::Copied(Capture { text: Some("hello".into()), ..cap(3) }));
+        m.go(Event::Opened(Some(APP)));
+        assert_eq!(m.shown().len(), 3);
+        type_text(&mut m, "report q3");
+        assert_eq!(m.shown().len(), 1);
+        assert!(matches!(m.shown()[0].content, Content::Files { .. }));
+        // folder names are not searched
+        m.go(press(Key::Esc));
+        type_text(&mut m, "users");
+        assert!(m.shown().is_empty());
+    }
+
+    #[test]
+    fn an_image_clip_pastes_whole_and_a_loaded_image_meets_its_copy() {
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { image: img(9), ..cap(1) }));
+        m.go(Event::Opened(Some(APP)));
+        let fx = m.go(press(Key::Enter));
+        assert!(matches!(fx.last(), Some(Effect::Paste { clip, .. }) if matches!(clip.content, Content::Image { hash: 9, .. })));
+        let saved = Clip { content: m.clips()[0].content.clone(), text: String::new(), ..Clip::plain(ClipId(900), String::new(), 5, true) };
+        m.go(Event::Loaded(vec![saved]));
+        assert_eq!(m.clips().len(), 1);
+        assert!(m.clips()[0].pinned);
     }
 }

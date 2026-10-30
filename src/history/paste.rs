@@ -10,24 +10,27 @@
 //! timer, a bounded number of times.
 
 use std::cell::{Cell, RefCell};
+use std::sync::{Arc, Mutex};
 
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY,
     VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_V,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, IsIconic, IsWindow, KillTimer, SetForegroundWindow, SetTimer, ShowWindow, SW_RESTORE,
+    GetForegroundWindow, IsIconic, IsWindow, KillTimer, PostMessageW, SetForegroundWindow, SetTimer, ShowWindow, SW_RESTORE,
 };
 
-use super::clip::Clip;
+use super::clip::{Clip, Content};
+use super::{formats, image};
 use super::state::{Event, Target};
 use crate::log::log;
+use crate::proto::WM_HISTORY_PASTE_READY;
 
 /// Timer ids on the resident window.
 pub const T_KEYS: usize = 0x4802;
@@ -37,22 +40,110 @@ const KEYS_DELAY_MS: u32 = 40;
 const WRITE_RETRY_MS: u32 = 25;
 const MAX_WRITE_TRIES: u32 = 12;
 
-/// A write waiting for the clipboard to be free.
+/// A clipboard format a Clip can be written as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Slot {
+    Text,
+    Html,
+    Rtf,
+    Png,
+    Dib,
+    Hdrop,
+}
+
+impl Slot {
+    fn id(self) -> u32 {
+        let f = super::record::content_formats();
+        match self {
+            Slot::Text => CF_UNICODETEXT.0 as u32,
+            Slot::Html => f.html,
+            Slot::Rtf => f.rtf,
+            Slot::Png => f.png,
+            Slot::Dib => CF_DIB.0 as u32,
+            Slot::Hdrop => CF_HDROP.0 as u32,
+        }
+    }
+}
+
+/// What goes on the clipboard for a Clip, in write order. Text: the text,
+/// then its HTML and RTF unless `plain`. Image: PNG (alpha) and, once decoded,
+/// DIB. Files: the `CF_HDROP` list. `plain` only concerns text. Pure.
+fn plan(clip: &Clip, plain: bool, dib: Option<Vec<u8>>) -> Vec<(Slot, Vec<u8>)> {
+    let nul = |s: &str| s.bytes().chain(Some(0)).collect::<Vec<u8>>();
+    match &clip.content {
+        Content::Text { html, rtf } => {
+            let units = clip.text.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+            let mut items = vec![(Slot::Text, units)];
+            if !plain {
+                items.extend(html.as_deref().map(|h| (Slot::Html, nul(h))));
+                items.extend(rtf.as_deref().map(|r| (Slot::Rtf, nul(r))));
+            }
+            items
+        }
+        Content::Image { png, .. } => {
+            let mut items = vec![(Slot::Png, png.to_vec())];
+            items.extend(dib.map(|d| (Slot::Dib, d)));
+            items
+        }
+        Content::Files { paths } => vec![(Slot::Hdrop, formats::encode_hdrop(paths))],
+    }
+}
+
+/// A write waiting for the clipboard to be free (or for the DIB to be made).
 struct Job {
-    clip: Clip,
+    items: Vec<(Slot, Vec<u8>)>,
     /// `None` = copy only.
     target: Option<Target>,
     tries: u32,
     owner: isize,
-    /// Only the plain text is written. Today a Clip is only plain text, so
-    /// this changes nothing yet; it is carried for the formatted Clips.
-    plain: bool,
+    /// An image's DIB is still being made on a worker.
+    waiting: bool,
+    /// Which paste this is, so a late worker cannot feed a newer one.
+    serial: u64,
 }
 
 thread_local! {
     static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
     /// The window that should have focus when the keys go out.
     static PENDING: Cell<Option<isize>> = const { Cell::new(None) };
+}
+
+/// The paste counter and the DIB a worker made, behind one lock: the worker's
+/// "is my paste still the newest" check and its publish cannot be split by a
+/// newer paste starting in between.
+#[derive(Default)]
+struct Prep {
+    current: u64,
+    /// (serial of the paste, DIB bytes; empty = it failed).
+    result: Option<(u64, Vec<u8>)>,
+}
+
+impl Prep {
+    /// A new paste starts: older workers' results are void.
+    fn begin(&mut self) -> u64 {
+        self.current += 1;
+        self.result = None;
+        self.current
+    }
+
+    /// A worker's result; `false` (and nothing stored) when its paste was replaced.
+    fn publish(&mut self, serial: u64, dib: Vec<u8>) -> bool {
+        let newest = self.current == serial;
+        if newest {
+            self.result = Some((serial, dib));
+        }
+        newest
+    }
+
+    fn take(&mut self) -> Option<(u64, Vec<u8>)> {
+        self.result.take()
+    }
+}
+
+static PREP: Mutex<Prep> = Mutex::new(Prep { current: 0, result: None });
+
+fn prep<R>(f: impl FnOnce(&mut Prep) -> R) -> R {
+    f(&mut PREP.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 enum Written {
@@ -63,34 +154,42 @@ enum Written {
     Failed,
 }
 
-fn write(owner: HWND, clip: &Clip) -> Written {
-    let units: Vec<u16> = clip.text.encode_utf16().chain(Some(0)).collect();
+/// A moveable global block holding `bytes`; the clipboard takes it on success.
+unsafe fn global_of(bytes: &[u8]) -> Option<HGLOBAL> {
     unsafe {
-        let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2) else { return Written::Failed };
-        let p = GlobalLock(mem) as *mut u16;
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)).ok()?;
+        let p = GlobalLock(mem) as *mut u8;
         if p.is_null() {
             let _ = GlobalFree(Some(mem));
-            return Written::Failed;
+            return None;
         }
-        std::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
         let _ = GlobalUnlock(mem);
+        Some(mem)
+    }
+}
+
+fn write(owner: HWND, items: &[(Slot, Vec<u8>)]) -> Written {
+    unsafe {
         if OpenClipboard(Some(owner)).is_err() {
-            let _ = GlobalFree(Some(mem));
             return Written::Busy;
         }
         let _ = EmptyClipboard();
-        // On success the clipboard owns `mem`.
-        let set = SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(mem.0)));
+        let mut first = false;
+        for (i, (slot, bytes)) in items.iter().enumerate() {
+            let Some(mem) = global_of(bytes) else { continue };
+            // On success the clipboard owns `mem`.
+            if SetClipboardData(slot.id(), Some(HANDLE(mem.0))).is_ok() {
+                first |= i == 0;
+            } else {
+                let _ = GlobalFree(Some(mem));
+            }
+        }
         // Nobody else can change the clipboard while it is open: this is ours.
         let seq = GetClipboardSequenceNumber();
-        if set.is_err() {
-            let _ = GlobalFree(Some(mem));
-        }
         let _ = CloseClipboard();
-        match set {
-            Ok(_) => Written::Done(seq),
-            Err(_) => Written::Failed,
-        }
+        // The first format is the one every target can take (text, PNG, the list).
+        if first { Written::Done(seq) } else { Written::Failed }
     }
 }
 
@@ -106,9 +205,53 @@ pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target, plain: bo
 }
 
 fn start(resident: HWND, owner: HWND, clip: &Clip, target: Option<Target>, plain: bool) {
+    let serial = prep(Prep::begin);
+    let image = matches!(clip.content, Content::Image { .. });
+    let job = Job { items: plan(clip, plain, None), target, tries: 0, owner: owner.0 as isize, waiting: image, serial };
     // A newer paste replaces one still waiting.
-    JOB.with(|j| *j.borrow_mut() = Some(Job { clip: clip.clone(), target, tries: 0, owner: owner.0 as isize, plain }));
-    attempt(resident);
+    JOB.with(|j| *j.borrow_mut() = Some(job));
+    if let Content::Image { png, .. } = &clip.content {
+        make_dib(resident, Arc::clone(png), serial);
+    } else {
+        attempt(resident);
+    }
+}
+
+/// Decode the PNG into a DIB on a worker (the UI thread must not);
+/// `WM_HISTORY_PASTE_READY` follows. If it fails the PNG alone is written.
+fn make_dib(resident: HWND, png: Arc<Vec<u8>>, serial: u64) {
+    let raw = resident.0 as isize;
+    let spawned = std::thread::Builder::new().name("history-dib".into()).spawn(move || {
+        let dib = image::decode_png(&png).ok().map(|b| image::bitmap_to_dib(&b)).unwrap_or_default();
+        if !prep(|p| p.publish(serial, dib)) {
+            return;
+        }
+        unsafe {
+            let _ = PostMessageW(Some(HWND(raw as *mut _)), WM_HISTORY_PASTE_READY, WPARAM(0), LPARAM(0));
+        }
+    });
+    if spawned.is_err() {
+        prep(|p| p.publish(serial, Vec::new()));
+        on_prepared(resident);
+    }
+}
+
+/// `WM_HISTORY_PASTE_READY`: the DIB is made; write the Clip.
+pub fn on_prepared(resident: HWND) {
+    let Some((serial, dib)) = prep(Prep::take) else { return };
+    let ready = JOB.with(|j| match j.borrow_mut().as_mut() {
+        Some(job) if job.serial == serial && job.waiting => {
+            job.waiting = false;
+            if !dib.is_empty() {
+                job.items.push((Slot::Dib, dib));
+            }
+            true
+        }
+        _ => false,
+    });
+    if ready {
+        attempt(resident);
+    }
 }
 
 /// `WM_TIMER` with `T_WRITE`.
@@ -121,9 +264,14 @@ fn attempt(resident: HWND) {
         let _ = KillTimer(Some(resident), T_WRITE);
     }
     let Some(job) = JOB.with(|j| j.borrow_mut().take()) else { return };
-    match write(HWND(job.owner as *mut _), &job.clip) {
+    if job.waiting {
+        JOB.with(|j| *j.borrow_mut() = Some(job));
+        return;
+    }
+    match write(HWND(job.owner as *mut _), &job.items) {
         Written::Done(seq) => {
-            log(format!("history: wrote a Clip (plain text only: {})", job.plain));
+            let kinds: Vec<Slot> = job.items.iter().map(|(s, _)| *s).collect();
+            log(format!("history: wrote a Clip ({kinds:?})"));
             super::dispatch(Event::OwnWrite(seq));
             if let Some(target) = job.target {
                 restore_and_schedule_keys(resident, target);
@@ -224,6 +372,92 @@ fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::clip::ClipId;
+
+    #[test]
+    fn a_stale_worker_never_overwrites_a_newer_paste() {
+        let mut p = Prep::default();
+        let a = p.begin();
+        let b = p.begin();
+        // B finishes first, then the slow A tries to publish.
+        assert!(p.publish(b, vec![2]));
+        assert!(!p.publish(a, vec![1]));
+        assert_eq!(p.take(), Some((b, vec![2])));
+        assert_eq!(p.take(), None);
+    }
+
+    #[test]
+    fn a_new_paste_voids_a_result_nobody_took_yet() {
+        let mut p = Prep::default();
+        let a = p.begin();
+        assert!(p.publish(a, vec![1]));
+        let b = p.begin();
+        assert_eq!(p.take(), None);
+        assert!(!p.publish(a, vec![1]));
+        assert!(p.publish(b, vec![2]));
+        assert_eq!(p.take(), Some((b, vec![2])));
+    }
+
+    #[test]
+    fn workers_racing_a_new_paste_leave_the_newest_result() {
+        let p = std::sync::Arc::new(Mutex::new(Prep::default()));
+        let old = p.lock().unwrap().begin();
+        let racers: Vec<_> = (0..8)
+            .map(|_| {
+                let p = std::sync::Arc::clone(&p);
+                std::thread::spawn(move || p.lock().unwrap().publish(old, vec![1]))
+            })
+            .collect();
+        let newest = p.lock().unwrap().begin();
+        assert!(p.lock().unwrap().publish(newest, vec![2]));
+        for r in racers {
+            let _ = r.join();
+        }
+        assert_eq!(p.lock().unwrap().take(), Some((newest, vec![2])));
+    }
+
+    fn text_clip(html: Option<&str>, rtf: Option<&str>) -> Clip {
+        Clip {
+            content: Content::Text { html: html.map(Into::into), rtf: rtf.map(Into::into) },
+            ..Clip::plain(ClipId(1), "hi".into(), 0, false)
+        }
+    }
+
+    fn slots(items: &[(Slot, Vec<u8>)]) -> Vec<Slot> {
+        items.iter().map(|(s, _)| *s).collect()
+    }
+
+    #[test]
+    fn formatted_text_is_written_with_html_and_rtf_and_plain_only_text() {
+        let clip = text_clip(Some("<b>"), Some("{\rtf1}"));
+        let full = plan(&clip, false, None);
+        assert_eq!(slots(&full), [Slot::Text, Slot::Html, Slot::Rtf]);
+        assert_eq!(full[0].1, [b'h', 0, b'i', 0, 0, 0]);
+        assert_eq!(full[1].1, b"<b>\0");
+        assert_eq!(slots(&plan(&clip, true, None)), [Slot::Text]);
+        assert_eq!(slots(&plan(&text_clip(None, None), false, None)), [Slot::Text]);
+        assert_eq!(slots(&plan(&text_clip(None, Some("r")), false, None)), [Slot::Text, Slot::Rtf]);
+    }
+
+    #[test]
+    fn an_image_is_written_as_png_then_dib_and_files_as_a_drop_list() {
+        let img = Clip {
+            content: Content::Image { width: 1, height: 1, png: Arc::new(vec![9, 9]), hash: 1 },
+            text: String::new(),
+            ..Clip::plain(ClipId(1), String::new(), 0, false)
+        };
+        assert_eq!(plan(&img, false, None), [(Slot::Png, vec![9, 9])]);
+        assert_eq!(slots(&plan(&img, true, Some(vec![1]))), [Slot::Png, Slot::Dib]);
+        let files = Clip {
+            content: Content::Files { paths: vec!["C:\\a.txt".into()] },
+            text: String::new(),
+            ..img
+        };
+        let items = plan(&files, false, None);
+        assert_eq!(slots(&items), [Slot::Hdrop]);
+        assert_eq!(formats::decode_hdrop(&items[0].1), ["C:\\a.txt"]);
+    }
+
 
     #[test]
     fn a_plain_paste_is_ctrl_v() {

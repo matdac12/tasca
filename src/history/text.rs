@@ -1,6 +1,9 @@
 //! The words on a History row: the one-line title, the type line ("Text · 2
 //! min") and the footer count. Pure, so the wording is unit-tested.
 
+use super::clip::{Clip, Content};
+use super::formats;
+
 const MIN_MS: u64 = 60_000;
 const HOUR_MS: u64 = 60 * MIN_MS;
 const DAY_MS: u64 = 24 * HOUR_MS;
@@ -53,6 +56,30 @@ pub fn kind_label(text: &str) -> &'static str {
     if is_link(text) { "Link" } else { "Text" }
 }
 
+/// What a Clip is, as the type line says it: Text / Formatted text / Link /
+/// Image · W × H / N files.
+pub fn clip_kind(clip: &Clip) -> String {
+    match &clip.content {
+        Content::Text { html, rtf } => match kind_label(&clip.text) {
+            "Link" => "Link".to_string(),
+            _ if html.is_some() || rtf.is_some() => "Formatted text".to_string(),
+            label => label.to_string(),
+        },
+        Content::Image { width, height, .. } => formats::image_label(*width, *height),
+        Content::Files { paths } => formats::files_label(paths.len()),
+    }
+}
+
+/// A row's one-line title. An image has no text: it is just "Image" (its size
+/// is on the type line).
+pub fn clip_title(clip: &Clip) -> String {
+    match &clip.content {
+        Content::Text { .. } => one_line(&clip.text),
+        Content::Image { .. } => "Image".to_string(),
+        Content::Files { paths } => formats::files_title(paths),
+    }
+}
+
 /// How long ago, as the row shows it: now / N min / N h / yesterday / N d.
 /// A time in the future (clock moved back) reads as "now".
 pub fn age(now_ms: u64, copied_ms: u64) -> String {
@@ -67,14 +94,14 @@ pub fn age(now_ms: u64, copied_ms: u64) -> String {
 }
 
 /// The grey line under a row's title: "Text · 2 min".
-pub fn type_line(text: &str, now_ms: u64, copied_ms: u64) -> String {
-    format!("{} · {}", kind_label(text), age(now_ms, copied_ms))
+pub fn type_line(clip: &Clip, now_ms: u64, copied_ms: u64) -> String {
+    format!("{} · {}", clip_kind(clip), age(now_ms, copied_ms))
 }
 
 /// The grey line under a pinned Clip's title: its type and no age (a pin is
 /// kept, not recent).
-pub fn pinned_line(text: &str) -> String {
-    kind_label(text).to_string()
+pub fn pinned_line(clip: &Clip) -> String {
+    clip_kind(clip)
 }
 
 /// The footer's right side.
@@ -84,7 +111,38 @@ pub fn count_label(clips: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use super::super::clip::ClipId;
     use super::*;
+
+    fn text_clip(text: &str) -> Clip {
+        Clip::plain(ClipId(1), text.into(), 0, false)
+    }
+
+    fn with(content: Content, text: &str) -> Clip {
+        Clip { content, ..text_clip(text) }
+    }
+
+    #[test]
+    fn formatted_text_images_and_files_read_as_their_kind() {
+        let html = Content::Text { html: Some("h".into()), rtf: None };
+        assert_eq!(clip_kind(&with(html.clone(), "hello")), "Formatted text");
+        // a lone URL stays a Link even when the page sent HTML with it
+        assert_eq!(clip_kind(&with(html, "https://example.com")), "Link");
+        let img = Content::Image { width: 1920, height: 1080, png: Arc::new(vec![]), hash: 0 };
+        let img = with(img, "");
+        assert_eq!(clip_kind(&img), "Image · 1920 × 1080");
+        assert_eq!(clip_title(&img), "Image");
+        assert_eq!(type_line(&img, 5 * DAY_MS, 5 * DAY_MS - 12 * MIN_MS), "Image · 1920 × 1080 · 12 min");
+        assert_eq!(pinned_line(&img), "Image · 1920 × 1080");
+        let paths = |p: &[&str]| Content::Files { paths: p.iter().map(|s| s.to_string()).collect() };
+        let one = with(paths(&["C:\\a\\Report.pdf"]), "");
+        assert_eq!((clip_title(&one).as_str(), clip_kind(&one).as_str()), ("Report.pdf", "1 file"));
+        let three = with(paths(&["C:\\a\\Report.pdf", "C:\\b.txt", "C:\\c"]), "");
+        assert_eq!((clip_title(&three).as_str(), clip_kind(&three).as_str()), ("Report.pdf +2", "3 files"));
+        assert_eq!(type_line(&three, 5 * DAY_MS, 5 * DAY_MS - 25 * MIN_MS), "3 files · 25 min");
+    }
 
     #[test]
     fn long_and_multiline_text_is_one_line() {
@@ -148,15 +206,15 @@ mod tests {
     #[test]
     fn the_type_line_joins_kind_and_age() {
         let now = 5 * DAY_MS;
-        assert_eq!(type_line("hello", now, now - 2 * MIN_MS), "Text · 2 min");
-        assert_eq!(type_line("https://example.com", now, now - 6 * MIN_MS), "Link · 6 min");
-        assert_eq!(type_line("x", now, now - 3 * HOUR_MS), "Text · 3 h");
+        assert_eq!(type_line(&text_clip("hello"), now, now - 2 * MIN_MS), "Text · 2 min");
+        assert_eq!(type_line(&text_clip("https://example.com"), now, now - 6 * MIN_MS), "Link · 6 min");
+        assert_eq!(type_line(&text_clip("x"), now, now - 3 * HOUR_MS), "Text · 3 h");
     }
 
     #[test]
     fn a_pinned_line_has_the_type_and_no_age() {
-        assert_eq!(pinned_line("hello"), "Text");
-        assert_eq!(pinned_line("https://example.com"), "Link");
+        assert_eq!(pinned_line(&text_clip("hello")), "Text");
+        assert_eq!(pinned_line(&text_clip("https://example.com")), "Link");
     }
 
     #[test]

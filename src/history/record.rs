@@ -9,6 +9,10 @@
 //! the read stale; when the running read lands, one more starts, so the latest
 //! copy wins. A busy clipboard is retried by the worker (it may sleep).
 //!
+//! The formats a Clip keeps follow `formats::choose_kind`; only those are
+//! copied out of the clipboard. An image's DIB is converted to PNG and hashed
+//! on this worker after the clipboard is closed.
+//!
 //! The private-copy filter runs in `read`, on the worker, while the clipboard
 //! is open: a copy that a password manager marks as private is dropped there
 //! (logged, never posted), so its text is not even read.
@@ -16,7 +20,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::w;
 use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, WPARAM};
@@ -25,10 +29,12 @@ use windows::Win32::System::DataExchange::{
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, RemoveClipboardFormatListener,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use super::state::{Capture, Event};
+use super::formats::{self, Kind, Offered};
+use super::image;
+use super::state::{Capture, CapturedImage, Event};
 use crate::log::log;
 use crate::proto::WM_HISTORY_READ;
 
@@ -36,6 +42,10 @@ const RETRY_MS: u64 = 25;
 const MAX_TRIES: u32 = 12;
 /// UTF-16 units; the cap is 10 MB of text, a few times that is read at most.
 const MAX_UNITS: usize = 32 * 1024 * 1024;
+/// Byte cap for HTML, RTF and the file list; the 10 MB Clip cap is checked on the result.
+const MAX_BYTES: usize = 32 * 1024 * 1024;
+/// Raw DIB cap: a 8K screenshot is about 130 MB.
+const MAX_DIB_BYTES: usize = 160 * 1024 * 1024;
 
 /// The History window (clipboard owner of our own writes), for the worker.
 static OWN_WINDOW: AtomicIsize = AtomicIsize::new(0);
@@ -279,24 +289,167 @@ impl Drop for Open {
     }
 }
 
+/// What one open of the clipboard copied out: raw bytes only, no decoding.
+#[derive(Default)]
+struct Raw {
+    seq: u32,
+    own: bool,
+    text: Option<String>,
+    html: Option<Vec<u8>>,
+    rtf: Option<Vec<u8>>,
+    hdrop: Option<Vec<u8>>,
+    dib: Option<Vec<u8>>,
+    /// A format was over its read limit.
+    oversized: bool,
+}
+
+fn available(format: u32) -> bool {
+    format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok()
+}
+
 /// What the clipboard holds now; `None` when it could not be opened (busy).
+/// The clipboard is open only while the bytes are copied out; the conversion
+/// (DIB to PNG, the pixel hash) runs after it is closed, still on the worker.
 fn read() -> Option<Outcome> {
-    let _open = Open::new()?;
-    if skip_as_private(crate::settings::current().skip_private, read_private) {
-        return Some(Outcome::Private);
-    }
-    let seq = unsafe { GetClipboardSequenceNumber() };
-    let own = unsafe { GetClipboardOwner() }.is_ok_and(|o| o.0 as isize == OWN_WINDOW.load(Ordering::Relaxed));
-    let text = if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok() {
-        unicode_text()
-    } else {
-        None
+    let raw = {
+        let _open = Open::new()?;
+        if skip_as_private(crate::settings::current().skip_private, read_private) {
+            return Some(Outcome::Private);
+        }
+        copy_out()
     };
-    Some(Outcome::Copy(Capture { seq, text, own }))
+    Some(Outcome::Copy(capture(raw)))
+}
+
+fn copy_out() -> Raw {
+    let f = content_formats();
+    let offered = Offered {
+        hdrop: available(CF_HDROP.0 as u32),
+        text: available(CF_UNICODETEXT.0 as u32),
+        html: available(f.html),
+        rtf: available(f.rtf),
+        dibv5: available(CF_DIBV5.0 as u32),
+        dib: available(CF_DIB.0 as u32),
+    };
+    let mut raw = Raw {
+        seq: unsafe { GetClipboardSequenceNumber() },
+        own: unsafe { GetClipboardOwner() }.is_ok_and(|o| o.0 as isize == OWN_WINDOW.load(Ordering::Relaxed)),
+        ..Raw::default()
+    };
+    // Only the formats the chosen kind keeps are read.
+    match formats::choose_kind(&offered) {
+        Some(Kind::Files) => raw.read(CF_HDROP.0 as u32, MAX_BYTES, |r| &mut r.hdrop),
+        Some(Kind::Text { html, rtf }) => {
+            raw.text = unicode_text(&mut raw.oversized);
+            // Blank text is not a text Clip (the machine drops it): an image offered with it is read.
+            if raw.text.as_deref().is_none_or(|t| t.trim().is_empty()) && (offered.dibv5 || offered.dib) {
+                let format = if offered.dibv5 { CF_DIBV5.0 } else { CF_DIB.0 } as u32;
+                raw.read(format, MAX_DIB_BYTES, |r| &mut r.dib);
+            }
+            if html {
+                raw.read(f.html, MAX_BYTES, |r| &mut r.html);
+            }
+            if rtf {
+                raw.read(f.rtf, MAX_BYTES, |r| &mut r.rtf);
+            }
+        }
+        Some(Kind::Image { v5 }) => {
+            let format = if v5 { CF_DIBV5.0 } else { CF_DIB.0 } as u32;
+            raw.read(format, MAX_DIB_BYTES, |r| &mut r.dib);
+        }
+        None => {}
+    }
+    raw
+}
+
+/// Decode the copied bytes into a `Capture`. Worker thread, clipboard closed.
+fn capture(raw: Raw) -> Capture {
+    let image = raw.dib.and_then(|dib| {
+        let t = Instant::now();
+        let (png, width, height, hash) = image::dib_to_png(&dib)?;
+        log(format!("history: image {width}x{height}, {} bytes of DIB to {} of PNG in {:?}", dib.len(), png.len(), t.elapsed()));
+        Some(CapturedImage { width, height, png, hash })
+    });
+    // A block that does not parse is not kept: pasted back it could confuse the target.
+    let html = raw.html.map(|b| text_of(&b)).filter(|h| formats::parse_cf_html(h.as_bytes()).is_some());
+    Capture {
+        seq: raw.seq,
+        own: raw.own,
+        text: raw.text,
+        html,
+        rtf: raw.rtf.map(|b| text_of(&b)),
+        image,
+        files: raw.hdrop.map(|b| formats::decode_hdrop(&b)),
+        oversized: raw.oversized,
+    }
+}
+
+/// Clipboard text formats end at the first NUL; bytes that are not UTF-8 are replaced.
+fn text_of(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// The registered clipboard formats of the formatted-text kinds.
+pub(super) struct ContentFormats {
+    pub html: u32,
+    pub rtf: u32,
+    pub png: u32,
+}
+
+pub(super) fn content_formats() -> &'static ContentFormats {
+    static FORMATS: OnceLock<ContentFormats> = OnceLock::new();
+    FORMATS.get_or_init(|| unsafe {
+        ContentFormats {
+            html: RegisterClipboardFormatW(w!("HTML Format")),
+            rtf: RegisterClipboardFormatW(w!("Rich Text Format")),
+            png: RegisterClipboardFormatW(w!("PNG")),
+        }
+    })
+}
+
+/// A global-memory format read: its bytes, or too big to read.
+enum Got {
+    Bytes(Vec<u8>),
+    TooBig,
+    /// Could not be read (no data, lock failed).
+    Unreadable,
+}
+
+/// The bytes of a global-memory format, up to `limit`. The clipboard owns the
+/// handle: copy, never free.
+fn global_bytes(format: u32, limit: usize) -> Got {
+    unsafe {
+        let Ok(handle) = GetClipboardData(format) else { return Got::Unreadable };
+        let h = HGLOBAL(handle.0);
+        let size = GlobalSize(h);
+        if size > limit {
+            log(format!("history: format {format} is {size} bytes, not read"));
+            return Got::TooBig;
+        }
+        let p = GlobalLock(h) as *const u8;
+        if p.is_null() {
+            return Got::Unreadable;
+        }
+        let bytes = std::slice::from_raw_parts(p, size).to_vec();
+        let _ = GlobalUnlock(h);
+        Got::Bytes(bytes)
+    }
+}
+
+impl Raw {
+    /// Read `format` into `slot`; a format over the limit marks the whole copy oversized.
+    fn read(&mut self, format: u32, limit: usize, slot: fn(&mut Raw) -> &mut Option<Vec<u8>>) {
+        match global_bytes(format, limit) {
+            Got::Bytes(b) => *slot(self) = Some(b),
+            Got::TooBig => self.oversized = true,
+            Got::Unreadable => {}
+        }
+    }
 }
 
 /// `CF_UNICODETEXT` as a string. The clipboard owns the handle: copy, never free.
-fn unicode_text() -> Option<String> {
+fn unicode_text(oversized: &mut bool) -> Option<String> {
     unsafe {
         let handle = GetClipboardData(CF_UNICODETEXT.0 as u32).ok()?;
         let h = HGLOBAL(handle.0);
@@ -309,6 +462,7 @@ fn unicode_text() -> Option<String> {
         if bytes / 2 > MAX_UNITS {
             let _ = GlobalUnlock(h);
             log("history: text too big, not read");
+            *oversized = true;
             return None;
         }
         let units = std::slice::from_raw_parts(p, bytes / 2);
