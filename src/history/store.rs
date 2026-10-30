@@ -37,6 +37,8 @@ use std::thread;
 
 /// Unpinned Clips kept; pinned ones are never counted or dropped.
 pub const MAX_UNPINNED: usize = 100;
+/// Pins allowed, so that pins plus `MAX_UNPINNED` always fit what the reader accepts.
+pub const MAX_PINNED: usize = MAX_RECORDS as usize - MAX_UNPINNED;
 
 const MAGIC: &[u8; 4] = b"TSCH";
 const VERSION: u32 = 2;
@@ -340,6 +342,8 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
 /// longer names (removed Clips, stray `.tmp` files).
 pub fn save_to(dir: &Path, records: &[Record]) -> io::Result<()> {
     fs::create_dir_all(dir)?;
+    // Never write what `decode` would reject (it then loads an empty History).
+    let records = &records[..records.len().min(MAX_RECORDS as usize)];
     let (index, blobs) = encode(records);
     let mut keep: HashSet<String> = HashSet::new();
     keep.insert(INDEX.to_string());
@@ -610,6 +614,16 @@ mod tests {
     }
 
     #[test]
+    fn the_writer_never_writes_more_records_than_the_reader_accepts() {
+        let dir = temp("overfull");
+        let many: Vec<Record> = (0..MAX_RECORDS as u64 + 50).map(|i| text(i, "x")).collect();
+        save_to(&dir, &many).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.len(), MAX_RECORDS as usize);
+        assert_eq!(loaded[0].id, 0, "the newest are kept");
+    }
+
+    #[test]
     fn cap_keeps_pins_and_the_newest_unpinned() {
         let mut list: Vec<Record> = (0..105).map(|i| text(200 - i, "x")).collect();
         list[3].pinned = true; // newest-first positions 0..105
@@ -674,7 +688,8 @@ mod tests {
         let dir = temp("budget");
         // Too many records.
         let many: Vec<Record> = (0..=MAX_RECORDS as u64).map(|i| text(i, "x")).collect();
-        save_to(&dir, &many).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(INDEX), encode(&many).0).unwrap();
         assert!(load_from(&dir).is_empty());
         // Duplicate ids.
         save_to(&dir, &[text(1, "a"), text(1, "b")]).unwrap();

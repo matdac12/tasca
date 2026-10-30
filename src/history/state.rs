@@ -112,6 +112,16 @@ pub enum Effect {
     Redraw,
     /// The Clips changed: write them to the store (once it has been read).
     Save,
+    /// An action was ignored; the shell logs why.
+    Refused(Refusal),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refusal {
+    /// Pinning would pass `store::MAX_PINNED`.
+    TooManyPins,
+    /// Delete and Clear wait for the stored History: it would bring them back.
+    NotLoaded,
 }
 
 #[derive(Default)]
@@ -362,6 +372,10 @@ impl Machine {
     /// Pin a Clip, or unpin it (then it falls back among the Recent ones by
     /// its last-copied time, and the cap applies to it again).
     fn toggle_pin(&mut self, id: ClipId) -> Vec<Effect> {
+        let pins = self.clips.iter().filter(|c| c.pinned).count();
+        if pins >= store::MAX_PINNED && self.clips.iter().any(|c| c.id == id && !c.pinned) {
+            return vec![Effect::Refused(Refusal::TooManyPins)];
+        }
         let selected = self.selected_id();
         let Some(clip) = self.clips.iter_mut().find(|c| c.id == id) else { return Vec::new() };
         clip.pinned = !clip.pinned;
@@ -371,6 +385,9 @@ impl Machine {
     }
 
     fn delete(&mut self, id: ClipId) -> Vec<Effect> {
+        if !self.loaded {
+            return vec![Effect::Refused(Refusal::NotLoaded)];
+        }
         let selected = self.selected_id().filter(|s| *s != id);
         self.clips.retain(|c| c.id != id);
         self.follow(selected);
@@ -378,6 +395,9 @@ impl Machine {
     }
 
     fn clear(&mut self) -> Vec<Effect> {
+        if !self.loaded {
+            return vec![Effect::Refused(Refusal::NotLoaded)];
+        }
         if self.clips.iter().all(|c| c.pinned) {
             return Vec::new();
         }
@@ -477,6 +497,13 @@ mod tests {
     /// The shown list as texts.
     fn shown(m: &Machine) -> Vec<&str> {
         m.shown().iter().map(|c| c.text.as_str()).collect()
+    }
+
+    /// The same, with the stored History already read (Delete and Clear wait for it).
+    fn open_loaded(items: &[&str]) -> Machine {
+        let mut m = open_with(items);
+        m.go(Event::Loaded(vec![]));
+        m
     }
 
     /// An open History (with a paste target) holding `items`, the last one newest.
@@ -936,6 +963,12 @@ mod tests {
         assert!(fx.contains(&Effect::Save));
     }
 
+    fn with_loaded(items: &[&str]) -> Machine {
+        let mut m = with(items);
+        m.go(Event::Loaded(vec![]));
+        m
+    }
+
     fn pin_selected(m: &mut Machine) -> Vec<Effect> {
         m.go(chord(Key::Pin, false, true, false))
     }
@@ -1062,10 +1095,10 @@ mod tests {
 
     #[test]
     fn ctrl_delete_deletes_the_selected_clip_pinned_or_not() {
-        let mut m = open_with(&["a", "b", "c"]); // c, b, a
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
         m.go(press(Key::Down));
         let fx = delete_selected(&mut m);
-        assert_eq!(fx, [Effect::Redraw]);
+        assert_eq!(fx, [Effect::Save, Effect::Redraw]);
         assert_eq!(texts(&m), ["c", "a"]);
         assert_eq!(m.selected(), 1);
         pin_selected(&mut m);
@@ -1077,7 +1110,7 @@ mod tests {
 
     #[test]
     fn delete_needs_ctrl_and_something_selected() {
-        let mut m = open_with(&["a"]);
+        let mut m = open_loaded(&["a"]);
         assert!(m.go(press(Key::Delete)).is_empty());
         assert_eq!(texts(&m), ["a"]);
         delete_selected(&mut m);
@@ -1087,7 +1120,7 @@ mod tests {
 
     #[test]
     fn delete_acts_on_the_filtered_list() {
-        let mut m = open_with(&["apple", "banana", "apricot"]);
+        let mut m = open_loaded(&["apple", "banana", "apricot"]);
         type_text(&mut m, "ap");
         m.go(press(Key::Down)); // apple
         delete_selected(&mut m);
@@ -1105,7 +1138,7 @@ mod tests {
 
     #[test]
     fn clear_deletes_every_unpinned_clip_and_keeps_the_pins() {
-        let mut m = open_with(&["a", "b", "c", "d"]); // d, c, b, a
+        let mut m = open_loaded(&["a", "b", "c", "d"]); // d, c, b, a
         m.go(press(Key::Down));
         pin_selected(&mut m); // c, now first of c, d, b, a
         for _ in 0..3 {
@@ -1113,7 +1146,7 @@ mod tests {
         }
         pin_selected(&mut m); // a
         let fx = m.go(Event::Clear);
-        assert_eq!(fx, [Effect::Redraw]);
+        assert_eq!(fx, [Effect::Save, Effect::Redraw]);
         assert_eq!(shown(&m), ["c", "a"]);
         assert!(m.clips().iter().all(|c| c.pinned));
         assert_eq!(m.selected(), 0);
@@ -1122,38 +1155,38 @@ mod tests {
 
     #[test]
     fn clear_clears_the_unpinned_even_while_searching_and_does_nothing_when_none() {
-        let mut m = open_with(&["ax", "by"]);
+        let mut m = open_loaded(&["ax", "by"]);
         type_text(&mut m, "a");
         m.go(Event::Clear);
         assert!(m.clips().is_empty());
         assert!(m.go(Event::Clear).is_empty());
-        let mut m = open_with(&["a"]);
+        let mut m = open_loaded(&["a"]);
         pin_selected(&mut m);
         assert!(m.go(Event::Clear).is_empty());
     }
 
     #[test]
     fn clear_works_while_closed_too() {
-        let mut m = with(&["a"]);
+        let mut m = with_loaded(&["a"]);
         m.go(Event::Clear);
         assert!(m.clips().is_empty());
     }
 
     #[test]
     fn the_right_click_menu_acts_on_a_clip_by_id() {
-        let mut m = open_with(&["a", "b", "c"]); // c, b, a
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
         let b = m.clips()[1].id;
         m.go(Event::ClipAction { id: b, action: Action::TogglePin });
         assert_eq!(shown(&m), ["b", "c", "a"]);
         let fx = m.go(Event::ClipAction { id: b, action: Action::PastePlain });
         assert!(matches!(fx.last(), Some(Effect::Paste { clip, plain: true, .. }) if clip.text == "b"));
 
-        let mut m = open_with(&["a", "b", "c"]);
+        let mut m = open_loaded(&["a", "b", "c"]);
         let a = m.clips()[2].id;
         let fx = m.go(Event::ClipAction { id: a, action: Action::Paste });
         assert!(matches!(fx.last(), Some(Effect::Paste { clip, plain: false, .. }) if clip.text == "a"));
 
-        let mut m = open_with(&["a", "b", "c"]);
+        let mut m = open_loaded(&["a", "b", "c"]);
         let c = m.clips()[0].id;
         m.go(Event::ClipAction { id: c, action: Action::Delete });
         assert_eq!(texts(&m), ["b", "a"]);
@@ -1161,12 +1194,12 @@ mod tests {
 
     #[test]
     fn a_menu_action_on_a_vanished_clip_or_a_closed_history_does_nothing() {
-        let mut m = open_with(&["a"]);
+        let mut m = open_loaded(&["a"]);
         let a = m.clips()[0].id;
         m.go(Event::ClipAction { id: a, action: Action::Delete });
         assert!(m.go(Event::ClipAction { id: a, action: Action::Paste }).is_empty());
 
-        let mut m = open_with(&["a"]);
+        let mut m = open_loaded(&["a"]);
         let a = m.clips()[0].id;
         m.go(Event::Deactivated);
         assert!(m.go(Event::ClipAction { id: a, action: Action::TogglePin }).is_empty());
@@ -1175,11 +1208,49 @@ mod tests {
 
     #[test]
     fn deleting_a_clip_above_keeps_the_same_clip_selected() {
-        let mut m = open_with(&["a", "b", "c"]); // c, b, a
+        let mut m = open_loaded(&["a", "b", "c"]); // c, b, a
         m.go(press(Key::Down));
         m.go(press(Key::Down)); // a
         let c = m.clips()[0].id;
         m.go(Event::ClipAction { id: c, action: Action::Delete });
         assert_eq!(m.shown()[m.selected()].text, "a");
+    }
+
+    #[test]
+    fn delete_and_clear_wait_for_the_stored_history() {
+        let mut m = open_with(&["a", "b"]); // not loaded
+        assert_eq!(delete_selected(&mut m), [Effect::Refused(Refusal::NotLoaded)]);
+        assert_eq!(m.go(Event::Clear), [Effect::Refused(Refusal::NotLoaded)]);
+        let b = m.clips()[0].id;
+        assert_eq!(m.go(Event::ClipAction { id: b, action: Action::Delete }), [Effect::Refused(Refusal::NotLoaded)]);
+        assert_eq!(texts(&m), ["b", "a"]);
+        // After the load they work, and a loaded Clip is not brought back.
+        m.go(Event::Loaded(vec![saved("old", 1, false)]));
+        delete_selected(&mut m);
+        assert_eq!(texts(&m), ["a", "old"]);
+    }
+
+    #[test]
+    fn pins_stop_at_the_budget_the_store_can_read() {
+        let mut m = Machine::default();
+        let pins: Vec<Clip> = (0..store::MAX_PINNED as u64).map(|i| saved(&format!("pin {i}"), i, true)).collect();
+        m.go(Event::Loaded(pins));
+        m.go(copy(1, "one more"));
+        let id = m.clips()[0].id;
+        assert_eq!(m.go(Event::Opened(None)), [Effect::Redraw]);
+        let fx = m.go(Event::ClipAction { id, action: Action::TogglePin });
+        assert_eq!(fx, [Effect::Refused(Refusal::TooManyPins)]);
+        assert!(!m.clips()[0].pinned);
+        // Select it and press Ctrl+P: refused the same way.
+        m.go(Event::Key(Key::Down, Mods::default()));
+        for _ in 0..store::MAX_PINNED {
+            m.go(Event::Key(Key::Down, Mods::default()));
+        }
+        assert_eq!(pin_selected(&mut m), [Effect::Refused(Refusal::TooManyPins)]);
+        // Unpinning one frees a place.
+        let first_pin = m.shown()[0].id;
+        m.go(Event::ClipAction { id: first_pin, action: Action::TogglePin });
+        assert_eq!(m.go(Event::ClipAction { id, action: Action::TogglePin }), [Effect::Save, Effect::Redraw]);
+        assert!(m.clips().iter().find(|c| c.id == id).unwrap().pinned);
     }
 }

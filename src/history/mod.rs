@@ -298,6 +298,7 @@ fn apply(effect: Effect) {
         Effect::Add(id) => log(format!("history: recorded clip {}", id.0)),
         Effect::MoveToTop(id) => log(format!("history: clip {} to the top", id.0)),
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
+        Effect::Refused(why) => log(format!("history: action ignored ({why:?})")),
         Effect::Redraw => redraw(),
         Effect::Save => save(),
         Effect::Close => window::hide(window),
