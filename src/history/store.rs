@@ -20,8 +20,6 @@
 //! index last, so a crash leaves either the old store or the new one. Anything
 //! unreadable (truncated, garbled, wrong magic or version) loads as empty.
 //! All of it runs on the worker thread, never the UI thread.
-// Wired in by the shell in a later step.
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::fs;
@@ -63,12 +61,12 @@ pub fn default_dir() -> Option<PathBuf> {
 
 /// Keep every pinned record and the first `max_unpinned` unpinned ones; the
 /// list is newest first, so the oldest unpinned fall off the end. Order kept.
-pub fn cap(records: Vec<Record>, max_unpinned: usize) -> Vec<Record> {
+pub fn cap<T>(records: Vec<T>, pinned: impl Fn(&T) -> bool, max_unpinned: usize) -> Vec<T> {
     let mut unpinned = 0;
     records
         .into_iter()
         .filter(|r| {
-            if r.pinned {
+            if pinned(r) {
                 return true;
             }
             unpinned += 1;
@@ -331,13 +329,14 @@ enum Job {
 /// state matters). The thread ends when the `Store` is dropped, after the
 /// queued jobs are done.
 pub struct Store {
-    tx: Sender<Job>,
+    tx: Option<Sender<Job>>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Store {
     pub fn spawn(dir: PathBuf) -> Store {
         let (tx, rx) = channel::<Job>();
-        thread::spawn(move || {
+        let worker = thread::spawn(move || {
             let mut pending: Option<Job> = None;
             loop {
                 let job = match pending.take() {
@@ -367,17 +366,33 @@ impl Store {
                 }
             }
         });
-        Store { tx }
+        Store { tx: Some(tx), worker: Some(worker) }
+    }
+
+    fn send(&self, job: Job) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(job);
+        }
     }
 
     /// Save these records (the caller has already capped them).
     pub fn save(&self, records: Vec<Record>) {
-        let _ = self.tx.send(Job::Save(records));
+        self.send(Job::Save(records));
     }
 
     /// Load on the worker; `done` runs there with the result.
     pub fn load(&self, done: impl FnOnce(Vec<Record>) + Send + 'static) {
-        let _ = self.tx.send(Job::Load(Box::new(done)));
+        self.send(Job::Load(Box::new(done)));
+    }
+}
+
+impl Drop for Store {
+    /// Quit: queued jobs finish before the process goes.
+    fn drop(&mut self) {
+        self.tx = None;
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
     }
 }
 
@@ -530,7 +545,7 @@ mod tests {
         let mut list: Vec<Record> = (0..105).map(|i| text(200 - i, "x")).collect();
         list[3].pinned = true; // newest-first positions 0..105
         list[104].pinned = true; // the very oldest, pinned
-        let kept = cap(list.clone(), MAX_UNPINNED);
+        let kept = cap(list.clone(), |r| r.pinned, MAX_UNPINNED);
         assert_eq!(kept.len(), 102); // 100 unpinned + 2 pins
         assert!(kept.iter().any(|r| r.id == list[104].id));
         assert!(kept.iter().any(|r| r.id == list[3].id));
@@ -541,8 +556,8 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort_by(|a, b| b.cmp(a));
         assert_eq!(ids, sorted);
-        assert_eq!(cap(vec![], 100), vec![]);
-        assert_eq!(cap(list.clone(), 1000), list);
+        assert_eq!(cap(Vec::<Record>::new(), |r| r.pinned, 100), vec![]);
+        assert_eq!(cap(list.clone(), |r| r.pinned, 1000), list);
     }
 
     #[test]

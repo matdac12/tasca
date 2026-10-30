@@ -4,6 +4,7 @@
 
 use super::clip::{Clip, ClipId};
 use super::search;
+use super::store;
 
 /// A single copy larger than this is skipped (spec: 10 MB).
 const MAX_CLIP_BYTES: usize = 10 * 1024 * 1024;
@@ -60,6 +61,8 @@ pub enum Event {
     Char(char),
     /// A left click on a row of the shown list.
     Click { row: usize, shift: bool },
+    /// The saved History was read at startup (newest first).
+    Loaded(Vec<Clip>),
     /// The History was opened; `None` when there is no app to paste into.
     Opened(Option<Target>),
     /// The window lost activation, or Alt+V was pressed again.
@@ -89,6 +92,8 @@ pub enum Effect {
     Copy { clip: Clip, plain: bool },
     Close,
     Redraw,
+    /// The Clips changed: write them to the store (once it has been read).
+    Save,
 }
 
 #[derive(Default)]
@@ -98,6 +103,9 @@ pub struct Machine {
     next_id: u64,
     /// Index into the shown list.
     selected: usize,
+    /// The store has been read. Until then nothing is saved: a save would
+    /// replace the stored History with only what was copied since start.
+    loaded: bool,
     /// The search text; the caret is always at its end.
     query: String,
     open: bool,
@@ -139,6 +147,7 @@ impl Machine {
                 self.own_seq = Some(seq);
                 Vec::new()
             }
+            Event::Loaded(saved) => self.loaded(saved),
             Event::Opened(target) => {
                 self.open = true;
                 self.target = target;
@@ -184,15 +193,66 @@ impl Machine {
             None => {
                 let id = ClipId(self.next_id);
                 self.next_id += 1;
-                self.clips.insert(0, Clip { id, text, last_copied_ms: now_ms });
+                self.clips.insert(0, Clip { id, text, last_copied_ms: now_ms, pinned: false });
                 effects.push(Effect::Add(id));
             }
         }
+        self.trim();
+        self.save(&mut effects);
         if self.open {
             // The highlight stays on the same Clip when the list shifts.
             if let Some(id) = selected_id {
                 self.selected = self.shown().iter().position(|c| c.id == id).unwrap_or(0);
             }
+            effects.push(Effect::Redraw);
+        }
+        effects
+    }
+
+    /// The 100 newest unpinned Clips and every pinned one stay.
+    fn trim(&mut self) {
+        let clips = std::mem::take(&mut self.clips);
+        self.clips = store::cap(clips, |c| c.pinned, store::MAX_UNPINNED);
+        self.selected = self.selected.min(self.shown().len().saturating_sub(1));
+    }
+
+    fn save(&self, effects: &mut Vec<Effect>) {
+        if self.loaded {
+            effects.push(Effect::Save);
+        }
+    }
+
+    /// The saved History arrived: what was copied since start stays on top,
+    /// the saved Clips follow without the ones copied again (the copy keeps
+    /// the saved pin). Saved ids are reissued so they cannot meet new ones.
+    fn loaded(&mut self, saved: Vec<Clip>) -> Vec<Effect> {
+        if self.loaded {
+            return Vec::new();
+        }
+        self.loaded = true;
+        let selected_id = self.shown().get(self.selected).map(|c| c.id);
+        let recorded = !self.clips.is_empty();
+        for mut old in saved {
+            match self.clips.iter_mut().find(|c| c.text == old.text) {
+                Some(same) => same.pinned |= old.pinned,
+                None => {
+                    old.id = ClipId(self.next_id);
+                    self.next_id += 1;
+                    self.clips.push(old);
+                }
+            }
+        }
+        let before = self.clips.len();
+        self.trim();
+        if let Some(id) = selected_id {
+            self.selected = self.shown().iter().position(|c| c.id == id).unwrap_or(0);
+        }
+        let mut effects = Vec::new();
+        // Unchanged on disk unless something was recorded or trimmed.
+        if recorded || self.clips.len() != before {
+            effects.push(Effect::Save);
+        }
+        if self.open {
             effects.push(Effect::Redraw);
         }
         effects
@@ -256,6 +316,7 @@ impl Machine {
         clip.last_copied_ms = now_ms;
         self.clips.insert(0, clip.clone());
         let mut effects = vec![Effect::MoveToTop(clip.id)];
+        self.save(&mut effects);
         effects.extend(self.close());
         effects.push(match self.target {
             Some(target) => Effect::Paste { clip, target, plain },
@@ -692,5 +753,91 @@ mod tests {
         assert!(m.go(Event::Click { row: 0, shift: false }).is_empty());
         assert!(m.go(chord(Key::Digit(1), true, false, false)).is_empty());
         assert_eq!(m.query(), "");
+    }
+
+    fn saved(text: &str, ms: u64, pinned: bool) -> Clip {
+        Clip { id: ClipId(900 + ms), text: text.into(), last_copied_ms: ms, pinned }
+    }
+
+    fn many(n: usize) -> Machine {
+        let mut m = Machine::default();
+        m.go(Event::Loaded(vec![]));
+        for i in 0..n {
+            m.go(copy(i as u32 + 1, &format!("clip {i}")));
+        }
+        m
+    }
+
+    #[test]
+    fn the_101st_unpinned_clip_pushes_out_the_oldest() {
+        let mut m = many(100);
+        assert_eq!(m.clips().len(), 100);
+        assert_eq!(m.clips().last().unwrap().text, "clip 0");
+        m.go(copy(1000, "newest"));
+        assert_eq!(m.clips().len(), 100);
+        assert_eq!(m.clips()[0].text, "newest");
+        assert_eq!(m.clips().last().unwrap().text, "clip 1");
+    }
+
+    #[test]
+    fn pins_are_not_counted_and_never_pushed_out() {
+        let mut m = Machine::default();
+        let mut pins: Vec<Clip> = (0..3).map(|i| saved(&format!("pin {i}"), i, true)).collect();
+        pins.extend((0..100).map(|i| saved(&format!("old {i}"), 100 + i, false)));
+        m.go(Event::Loaded(pins));
+        assert_eq!(m.clips().len(), 103);
+        for i in 0..5 {
+            m.go(copy(i + 1, &format!("new {i}")));
+        }
+        assert_eq!(m.clips().len(), 103);
+        assert_eq!(m.clips().iter().filter(|c| c.pinned).count(), 3);
+        assert!(!m.clips().iter().any(|c| c.text == "old 99"));
+    }
+
+    #[test]
+    fn loaded_goes_below_what_was_recorded_since_start_without_duplicates() {
+        let mut m = with(&["a", "b"]); // b, a
+        let fx = m.go(Event::Loaded(vec![saved("a", 5, true), saved("x", 4, false), saved("y", 3, false)]));
+        assert_eq!(texts(&m), ["b", "a", "x", "y"]);
+        // The re-copied Clip keeps the saved pin.
+        assert!(m.clips()[1].pinned);
+        assert!(fx.contains(&Effect::Save));
+        let mut ids: Vec<u64> = m.clips().iter().map(|c| c.id.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "ids are distinct");
+        // New Clips keep getting fresh ids.
+        m.go(copy(10, "z"));
+        assert_eq!(m.clips().iter().map(|c| c.id.0).collect::<std::collections::HashSet<_>>().len(), 5);
+    }
+
+    #[test]
+    fn nothing_is_saved_before_the_store_is_read() {
+        let mut m = Machine::default();
+        assert_eq!(m.go(copy(1, "a")), [Effect::Add(ClipId(0))]);
+        let fx = m.go(Event::Loaded(vec![]));
+        assert_eq!(fx, [Effect::Save], "what was recorded meanwhile is saved");
+        assert_eq!(m.go(copy(2, "b")), [Effect::Add(ClipId(1)), Effect::Save]);
+        // A second Loaded changes nothing.
+        assert!(m.go(Event::Loaded(vec![saved("q", 1, false)])).is_empty());
+        assert_eq!(texts(&m), ["b", "a"]);
+    }
+
+    #[test]
+    fn loading_into_an_untouched_history_saves_nothing_and_redraws_when_open() {
+        let mut m = Machine::default();
+        m.go(Event::Opened(None));
+        assert_eq!(m.go(Event::Loaded(vec![saved("a", 1, false)])), [Effect::Redraw]);
+        assert_eq!(texts(&m), ["a"]);
+    }
+
+    #[test]
+    fn paste_back_saves_the_new_order() {
+        let mut m = many(2);
+        m.go(Event::Opened(Some(APP)));
+        let fx = m.go(press(Key::Down));
+        assert_eq!(fx, [Effect::Redraw]);
+        let fx = m.go(press(Key::Enter));
+        assert!(fx.contains(&Effect::Save));
     }
 }
