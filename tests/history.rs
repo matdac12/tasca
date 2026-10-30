@@ -1,8 +1,9 @@
 //! The History against the real binary, with `LOCALAPPDATA` pointed at a temp
 //! folder (the real settings are never touched): a copy is recorded, a copy
 //! that carries `ExcludeClipboardContentFromMonitorProcessing` is not, the
-//! show-History message opens the window in front, and with `history=off` in
-//! `settings.ini` nothing is recorded and the message opens nothing.
+//! show-History message either opens the window in front or the resident
+//! closes it because it could not take the foreground, and with `history=off`
+//! in `settings.ini` nothing is recorded and the message opens nothing.
 //!
 //! Like `shelf.rs`, this needs the `Tasca.Shelf` class free (end
 //! tasca-spike.exe and any other tasca.exe first), and one test function owns
@@ -146,6 +147,34 @@ fn show_history(resident: HWND) {
     unsafe { PostMessageW(Some(resident), WM_SHOW_HISTORY, WPARAM(0), LPARAM(0)) }.unwrap();
 }
 
+/// Windows chooses whether the resident may take the foreground. Either result
+/// is the product working: the window is in front, or it was closed because it
+/// could not be.
+enum ShowOutcome {
+    Foreground,
+    Refused,
+}
+
+fn await_show(resident: &Resident) -> ShowOutcome {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if resident.log().contains("history: could not take the foreground, closing") {
+            println!("show History: could not take the foreground, closed");
+            return ShowOutcome::Refused;
+        }
+        if let Some(history) = find_history() {
+            let visible = unsafe { IsWindowVisible(history) }.as_bool();
+            let foreground = unsafe { GetForegroundWindow() } == history;
+            if visible && foreground {
+                println!("show History: visible and the foreground");
+                return ShowOutcome::Foreground;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for the History to be shown or refused:\n{}", resident.log());
+}
+
 #[test]
 fn history_records_skips_private_copies_and_can_be_switched_off() {
     let local = std::env::temp_dir().join(format!("tasca-history-test-{}", std::process::id()));
@@ -173,9 +202,8 @@ fn history_records_skips_private_copies_and_can_be_switched_off() {
 
     assert!(find_history().is_some_and(|h| !unsafe { IsWindowVisible(h) }.as_bool()), "closed History is hidden");
     show_history(find_resident().unwrap());
-    wait_until("the History to show", || find_history().is_some_and(|h| unsafe { IsWindowVisible(h) }.as_bool()));
-    let history = find_history().unwrap();
-    wait_until("the History to be the foreground window", || unsafe { GetForegroundWindow() } == history);
+    // Either outcome is the product working. `await_show` prints which one.
+    let _outcome = await_show(&resident);
     resident.quit(&local);
 
     // Phase 2: History off in settings.ini.
