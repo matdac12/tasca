@@ -44,7 +44,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             return LRESULT(0);
         }
         match msg {
-            WM_HOTKEY if wp.0 as i32 == hotkey::REGISTER_ID => {
+            WM_HOTKEY if hotkey::Slot::from_id(wp.0 as i32) == Some(hotkey::Slot::Shelf) => {
                 on_toggle(hwnd);
                 LRESULT(0)
             }
@@ -146,8 +146,13 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             Some(hk) => log(format!("settings: shortcut {}", hk.text())),
             None => log("settings: shortcut cleared"),
         }
-        let _ = hotkey::start(hwnd, configured.shortcut);
-        let (shortcut, shortcut_error) = hotkey::display();
+        let _ = hotkey::start(
+            hwnd,
+            hotkey::Slot::Shelf,
+            configured.shortcut,
+            Some(hotkey::Hotkey::DEFAULT),
+        );
+        let (shortcut, shortcut_error) = hotkey::display(hotkey::Slot::Shelf);
         tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref(), None));
         #[cfg(debug_assertions)]
         if std::env::var_os("TASCA_DEV_SETTINGS").is_some() {
