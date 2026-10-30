@@ -27,6 +27,9 @@ pub const WM_RECORD_STOP: u32 = WM_APP + 19;
 /// TASCA-26: the settings worker finished saving; the resident shows a failure in the tray tooltip.
 pub const WM_SETTINGS_SAVED: u32 = WM_APP + 20;
 
+/// The History is asked to open (the tray, the integration test). No pointer in the message.
+pub const WM_SHOW_HISTORY: u32 = WM_APP + 21;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -43,6 +46,7 @@ mod tests {
             WM_TRAY,
             WM_RECORD_STOP,
             WM_SETTINGS_SAVED,
+            WM_SHOW_HISTORY,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");

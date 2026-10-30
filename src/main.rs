@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod history;
 mod hotkey;
 mod launch;
 mod log;
