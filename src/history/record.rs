@@ -13,12 +13,13 @@
 //! is open); the state machine decides what to do with the answer.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, CloseClipboard, GetClipboardData, GetClipboardSequenceNumber,
+    AddClipboardFormatListener, CloseClipboard, GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RemoveClipboardFormatListener,
 };
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
@@ -33,6 +34,9 @@ const RETRY_MS: u64 = 25;
 const MAX_TRIES: u32 = 12;
 /// UTF-16 units; the cap is 10 MB of text, a few times that is read at most.
 const MAX_UNITS: usize = 32 * 1024 * 1024;
+
+/// The History window (clipboard owner of our own writes), for the worker.
+static OWN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 
 /// Finished reads, newest last; `None` = the clipboard stayed busy.
 static DONE: Mutex<Vec<Option<Capture>>> = Mutex::new(Vec::new());
@@ -71,7 +75,8 @@ thread_local! {
     static FLIGHT: Cell<Flight> = const { Cell::new(Flight { running: false, stale: false }) };
 }
 
-pub fn start(hwnd: HWND) {
+pub fn start(hwnd: HWND, own_window: HWND) {
+    OWN_WINDOW.store(own_window.0 as isize, Ordering::Relaxed);
     match unsafe { AddClipboardFormatListener(hwnd) } {
         Ok(()) => log("history: clipboard listener on"),
         Err(e) => log(format!("history: AddClipboardFormatListener failed: {e:?}")),
@@ -161,12 +166,13 @@ impl Drop for Open {
 fn read() -> Option<Capture> {
     let _open = Open::new()?;
     let seq = unsafe { GetClipboardSequenceNumber() };
+    let own = unsafe { GetClipboardOwner() }.is_ok_and(|o| o.0 as isize == OWN_WINDOW.load(Ordering::Relaxed));
     let text = if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32) }.is_ok() {
         unicode_text()
     } else {
         None
     };
-    Some(Capture { seq, text })
+    Some(Capture { seq, text, own })
 }
 
 /// `CF_UNICODETEXT` as a string. The clipboard owns the handle: copy, never free.

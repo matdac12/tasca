@@ -18,6 +18,10 @@ pub struct Capture {
     pub seq: u32,
     /// `CF_UNICODETEXT`, if the copy offered it.
     pub text: Option<String>,
+    /// The clipboard's owner was the History window: one of our own writes.
+    /// The sequence number alone is not enough (the update can report a later
+    /// number than the one taken at write time).
+    pub own: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -113,7 +117,7 @@ impl Machine {
             return vec![Effect::Skip(Skip::SameUpdate)];
         }
         self.last_seq = Some(capture.seq);
-        if self.own_seq == Some(capture.seq) {
+        if capture.own || self.own_seq == Some(capture.seq) {
             return vec![Effect::Skip(Skip::OwnWrite)];
         }
         let text = match capture.text {
@@ -200,7 +204,7 @@ mod tests {
     use super::*;
 
     fn copy(seq: u32, text: &str) -> Event {
-        Event::Copied(Capture { seq, text: Some(text.to_string()) })
+        Event::Copied(Capture { seq, text: Some(text.to_string()), own: false })
     }
 
     fn texts(m: &Machine) -> Vec<&str> {
@@ -247,6 +251,16 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_owned_by_the_history_window_is_skipped_whatever_its_sequence_number() {
+        let mut m = with(&["a"]);
+        m.step(Event::OwnWrite(7));
+        // The update reports a later number than the one taken at write time.
+        let ours = Capture { seq: 9, text: Some("b".into()), own: true };
+        assert_eq!(m.step(Event::Copied(ours)), [Effect::Skip(Skip::OwnWrite)]);
+        assert_eq!(texts(&m), ["a"]);
+    }
+
+    #[test]
     fn the_same_sequence_number_is_handled_once() {
         let mut m = Machine::default();
         m.step(copy(3, "a"));
@@ -257,7 +271,7 @@ mod tests {
     #[test]
     fn blank_missing_and_huge_text_is_not_recorded() {
         let mut m = Machine::default();
-        assert_eq!(m.step(Event::Copied(Capture { seq: 1, text: None })), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.step(Event::Copied(Capture { seq: 1, text: None, own: false })), [Effect::Skip(Skip::NothingRecordable)]);
         assert_eq!(m.step(copy(2, " \r\n\t")), [Effect::Skip(Skip::NothingRecordable)]);
         assert_eq!(m.step(copy(3, &"x".repeat(MAX_CLIP_BYTES + 1))), [Effect::Skip(Skip::TooBig)]);
         assert!(m.clips().is_empty());

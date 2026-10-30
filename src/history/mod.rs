@@ -73,7 +73,7 @@ pub fn create(resident: HWND) -> Result<()> {
         *c.borrow_mut() =
             Some(Shell { resident, window, machine: Machine::default(), scale: 1.0, pointer: (0, 0), gap: 0, work: window::Work::default() })
     });
-    record::start(resident);
+    record::start(resident, window);
     Ok(())
 }
 
