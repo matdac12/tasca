@@ -408,6 +408,7 @@ pub(crate) fn on_right_click(x: i32, y: i32) {
         _ => None,
     });
     let Some(Some((window, id, pinned))) = target else { return };
+    dispatch(Event::Select(id));
     if let Some(action) = menu::pick(window, pinned, x, y) {
         dispatch(Event::ClipAction { id, action });
     }

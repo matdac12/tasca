@@ -77,6 +77,9 @@ pub enum Event {
     /// A right-click menu choice. The Clip is named by id: the list can change
     /// while the menu is up.
     ClipAction { id: ClipId, action: Action },
+    /// A right-click on a row: select it, so the highlight shows which Clip
+    /// the menu acts on.
+    Select(ClipId),
     /// "Clear" in the footer: every unpinned Clip goes, pins stay.
     Clear,
     /// The saved History was read at startup (newest first).
@@ -203,8 +206,12 @@ impl Machine {
             }
             Event::Click { row, shift } if self.open => self.paste_row(row, shift, now_ms),
             Event::ClipAction { id, action } if self.open => self.clip_action(id, action, now_ms),
+            Event::Select(id) if self.open => match self.shown().iter().position(|c| c.id == id) {
+                Some(row) => self.select(row),
+                None => Vec::new(),
+            },
             Event::Clear => self.clear(),
-            Event::Key(..) | Event::Char(_) | Event::Click { .. } | Event::ClipAction { .. } => Vec::new(),
+            Event::Key(..) | Event::Char(_) | Event::Click { .. } | Event::ClipAction { .. } | Event::Select(_) => Vec::new(),
             Event::Deactivated => self.close(),
         }
     }
@@ -1252,5 +1259,18 @@ mod tests {
         m.go(Event::ClipAction { id: first_pin, action: Action::TogglePin });
         assert_eq!(m.go(Event::ClipAction { id, action: Action::TogglePin }), [Effect::Save, Effect::Redraw]);
         assert!(m.clips().iter().find(|c| c.id == id).unwrap().pinned);
+    }
+
+    #[test]
+    fn a_right_click_selects_the_row_and_redraws_only_when_it_moves() {
+        let mut m = open_with(&["a", "b", "c"]); // c, b, a
+        let a = m.clips()[2].id;
+        assert_eq!(m.go(Event::Select(a)), [Effect::Redraw]);
+        assert_eq!(m.shown()[m.selected()].text, "a");
+        assert!(m.go(Event::Select(a)).is_empty());
+        // Closed History or a vanished Clip: nothing.
+        assert!(m.go(Event::Select(ClipId(999))).is_empty());
+        m.go(Event::Deactivated);
+        assert!(m.go(Event::Select(a)).is_empty());
     }
 }
