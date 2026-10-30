@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-30
+
+### Added
+
+- Clipboard History: everything you copy is recorded as a Clip. **Alt+V**
+  opens a dark panel at the pointer, inside the monitor's work area, with
+  Pinned Clips on top and the rest under Recent, newest first. It takes
+  keyboard focus while open and closes on Alt+V, on Esc with an empty search,
+  or on a click elsewhere.
+- Type to search: every word must appear in the Clip, in any order, ignoring
+  case. File Clips match by file name; image Clips never match.
+- Paste back into the app you came from: Enter or click, Shift for plain text,
+  Alt+1..9 or Ctrl+1..9 for the numbered Clip (also while Alt is still held
+  from Alt+V). The Clip stays on the clipboard and moves to the top.
+- Ctrl+P pins or unpins a Clip, Ctrl+Delete deletes one, **Clear** in the
+  footer deletes every unpinned Clip, and a right-click menu offers Paste,
+  Paste as plain text, Pin/Unpin and Delete.
+- Text is recorded with its HTML and RTF formatting, images as PNG, and files
+  copied in Explorer as their path list. Copying a Clip again moves it to the
+  top and keeps its pin. A copy over 10 MB is skipped.
+- The History survives Quit and reboots: the newest 100 unpinned Clips and
+  every pin are saved under `%LOCALAPPDATA%\Tasca\history\`. A damaged store
+  loads as an empty History.
+- Copies that password managers mark as private are skipped by default.
+- Settings: **Clipboard history** on or off, **History shortcut** (Alt+V by
+  default, refused when it equals the Shelf shortcut) and **Skip private
+  copies (password managers)**. New `settings.ini` keys `history`,
+  `history_shortcut` and `skip_private`.
+- **Show clipboard history** in the tray menu, which copies the chosen Clip
+  instead of pasting. The tray tooltip lists both shortcuts.
+- A new app icon, the Shelf at the edge of the screen, with a small variant
+  for the tray.
+
+### Fixed
+
+- Pasting a Clip no longer records it again as a new Clip.
+- A failed Settings apply puts the Shelf shortcut back as it was.
+- A right-click selects its row before the menu opens.
+
 ## [0.1.0] - 2026-10-22
 
 ### Added
@@ -53,5 +92,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/install.ps1` installs an unzipped release without building when a
   `tasca.exe` sits next to it, and still builds from source otherwise.
 
-[Unreleased]: https://github.com/matdac12/tasca/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/matdac12/tasca/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/matdac12/tasca/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/matdac12/tasca/releases/tag/v0.1.0
