@@ -4,7 +4,6 @@
 use std::cell::Cell;
 
 use windows::core::{w, Result};
-use windows::Win32::System::DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
 };
@@ -56,42 +55,13 @@ pub fn history_running() -> bool {
     HISTORY.get().listening
 }
 
-fn set_listener(hwnd: HWND, on: bool) -> bool {
-    let result = unsafe {
-        if on {
-            AddClipboardFormatListener(hwnd)
-        } else {
-            RemoveClipboardFormatListener(hwnd)
-        }
-    };
-    match result {
-        Ok(()) => {
-            log(format!("history: clipboard listener {}", if on { "on" } else { "off" }));
-            true
-        }
-        Err(e) => {
-            log(format!("history: clipboard listener {} failed: {e:?}", if on { "on" } else { "off" }));
-            false
-        }
-    }
-}
-
-/// `history::create` adds the listener but does not say whether it worked.
-/// Take it off (silently: it may not be there) and put it back to find out.
-fn confirm_listener(hwnd: HWND) -> bool {
-    unsafe {
-        let _ = RemoveClipboardFormatListener(hwnd);
-    }
-    set_listener(hwnd, true)
-}
-
 /// Make the History window once. `false` when that failed (then never again).
 fn create_history(hwnd: HWND) -> std::result::Result<(), String> {
     let mut state = HISTORY.get();
     match history::create(hwnd) {
         Ok(()) => {
             state.created = true;
-            state.listening = confirm_listener(hwnd);
+            state.listening = true; // `create` starts the listener
             HISTORY.set(state);
             Ok(())
         }
@@ -130,8 +100,8 @@ pub fn restore_history(hwnd: HWND, backup: HistoryBackup) {
     let mut state = backup.state;
     state.created |= now.created;
     state.create_failed |= now.create_failed;
-    if now.listening != state.listening && !set_listener(hwnd, state.listening) {
-        state.listening = now.listening;
+    if now.listening != state.listening {
+        history::set_listening(hwnd, state.listening);
     }
     HISTORY.set(state);
     hotkey::restore(hwnd, hotkey::Slot::History, backup.shortcut);
@@ -154,9 +124,7 @@ pub fn set_history(hwnd: HWND, on: bool, shortcut: Option<hotkey::Hotkey>) -> st
         if !state.created {
             create_history(hwnd)?;
         } else if !state.listening {
-            if !set_listener(hwnd, true) {
-                return Err("Clipboard history could not start listening".to_string());
-            }
+            history::set_listening(hwnd, true);
             state.listening = true;
             HISTORY.set(state);
         }
@@ -166,7 +134,7 @@ pub fn set_history(hwnd: HWND, on: bool, shortcut: Option<hotkey::Hotkey>) -> st
         }
     } else {
         if state.listening {
-            set_listener(hwnd, false);
+            history::set_listening(hwnd, false);
             state.listening = false;
             HISTORY.set(state);
         }
