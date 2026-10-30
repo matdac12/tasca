@@ -170,7 +170,7 @@ pub fn remove() {
 
 /// Refresh the tooltip from the current shortcut state.
 pub fn refresh() {
-    let (shortcut, error) = crate::hotkey::display();
+    let (shortcut, error) = crate::hotkey::display(crate::hotkey::Slot::Shelf);
     let notice = notice();
     update_tip(&tip(shortcut, error.as_deref(), notice.as_deref()));
 }

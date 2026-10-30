@@ -340,7 +340,7 @@ fn create(parent: HWND) -> windows::core::Result<()> {
             None,
         )?;
 
-        let (shortcut, error) = hotkey::display();
+        let (shortcut, error) = hotkey::display(hotkey::Slot::Shelf);
         let font = make_font(dpi, false);
         let font_bold = make_font(dpi, true);
         let focus_brush = CreateSolidBrush(FOCUS_COLOR);
@@ -756,7 +756,7 @@ fn on_ok(hwnd: HWND) {
         return;
     };
     let checked = unsafe { SendMessageW(start_ctl, BM_GETCHECK, None, None) }.0 == 1;
-    if let Err(e) = hotkey::change(parent, pending) {
+    if let Err(e) = hotkey::change(parent, hotkey::Slot::Shelf, pending) {
         set_status(&e, true);
         invalidate(field);
         let _ = unsafe { SetFocus(Some(field)) };

@@ -229,7 +229,65 @@ pub fn key_vk(name: &str) -> Option<u32> {
         .map(|(_, code)| *code)
 }
 
-#[derive(Default)]
+/// The two global shortcuts: the Shelf's and the History's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Slot {
+    Shelf,
+    History,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 2] = [Slot::Shelf, Slot::History];
+
+    /// The `RegisterHotKey` id of this shortcut; `WM_HOTKEY`'s `wParam`.
+    pub const fn id(self) -> i32 {
+        match self {
+            Slot::Shelf => REGISTER_ID,
+            Slot::History => REGISTER_ID + 1,
+        }
+    }
+
+    /// Which shortcut a `WM_HOTKEY` id belongs to.
+    pub fn from_id(id: i32) -> Option<Slot> {
+        Slot::ALL.into_iter().find(|s| s.id() == id)
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+
+    fn other(self) -> Slot {
+        match self {
+            Slot::Shelf => Slot::History,
+            Slot::History => Slot::Shelf,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Slot::Shelf => "shelf",
+            Slot::History => "history",
+        }
+    }
+}
+
+/// Why `desired` cannot be this shortcut: unsafe, or the same chord as the
+/// other shortcut (`other`). Pure; used by `start`, `change` and the tests.
+pub fn refusal(slot: Slot, desired: Option<Hotkey>, other: Option<Hotkey>) -> Option<String> {
+    let hk = desired?;
+    if let Some(reason) = hk.unsafe_reason() {
+        return Some(reason);
+    }
+    (other == Some(hk)).then(|| {
+        format!(
+            "{} is already the {} shortcut. Pick another.",
+            hk.text(),
+            slot.other().name()
+        )
+    })
+}
+
+#[derive(Default, Clone)]
 struct State {
     /// Registered right now (None when cleared or when registration failed).
     active: Option<Hotkey>,
@@ -239,50 +297,59 @@ struct State {
 }
 
 thread_local! {
-    static STATE: RefCell<State> = RefCell::new(State::default());
+    static STATE: RefCell<[State; 2]> = RefCell::new(Default::default());
 }
 
-fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    STATE.with(|s| f(&mut s.borrow_mut()))
+fn with<R>(slot: Slot, f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with(|s| f(&mut s.borrow_mut()[slot.index()]))
 }
 
 /// The shortcut to display and the reason it is not active, if any.
-pub fn display() -> (Option<Hotkey>, Option<String>) {
-    with(|s| (s.shown, s.error.clone()))
+pub fn display(slot: Slot) -> (Option<Hotkey>, Option<String>) {
+    with(slot, |s| (s.shown, s.error.clone()))
 }
 
-/// Resident startup: register the saved shortcut.
-pub fn start(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
-    let desired = match desired {
-        Some(hk) if !hk.is_safe() => {
-            log(format!("hotkey: {} is unsafe, using the default", hk.text()));
-            Some(Hotkey::DEFAULT)
+/// Resident startup: register the saved shortcut. An unsafe one falls back to
+/// `fallback`, or none if that is refused too.
+pub fn start(
+    hwnd: HWND,
+    slot: Slot,
+    desired: Option<Hotkey>,
+    fallback: Option<Hotkey>,
+) -> Result<(), String> {
+    let other = with(slot.other(), |s| s.shown);
+    // An unusable shortcut falls back to the default; the fallback itself must
+    // pass the same rule, so a clash with the other shortcut ends with none.
+    let desired = match refusal(slot, desired, other) {
+        Some(reason) => {
+            log(format!("hotkey {}: {reason}, using the default", slot.name()));
+            fallback.filter(|_| refusal(slot, fallback, other).is_none())
         }
-        other => other,
+        None => desired,
     };
     let result = match desired {
-        Some(hk) => register(hwnd, hk),
+        Some(hk) => register(hwnd, slot, hk),
         None => Ok(()),
     };
     match &result {
         Ok(()) => {
-            with(|s| {
+            with(slot, |s| {
                 s.active = desired;
                 s.shown = desired;
                 s.error = None;
             });
             match desired {
-                Some(hk) => log(format!("hotkey registered: {}", hk.text())),
-                None => log("hotkey: none configured"),
+                Some(hk) => log(format!("hotkey {} registered: {}", slot.name(), hk.text())),
+                None => log(format!("hotkey {}: none configured", slot.name())),
             }
         }
         Err(e) => {
-            with(|s| {
+            with(slot, |s| {
                 s.active = None;
                 s.shown = desired;
                 s.error = Some(e.clone());
             });
-            log(format!("hotkey registration failed: {e}"));
+            log(format!("hotkey {} registration failed: {e}", slot.name()));
         }
     }
     result
@@ -290,81 +357,83 @@ pub fn start(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
 
 /// Settings OK: switch to `desired` now. On failure the previously registered
 /// shortcut is put back, so a taken combination never leaves Tasca with none.
-pub fn change(hwnd: HWND, desired: Option<Hotkey>) -> Result<(), String> {
-    if let Some(reason) = desired.and_then(|hk| hk.unsafe_reason()) {
+pub fn change(hwnd: HWND, slot: Slot, desired: Option<Hotkey>) -> Result<(), String> {
+    let other = with(slot.other(), |s| s.shown);
+    if let Some(reason) = refusal(slot, desired, other) {
         return Err(reason);
     }
-    if with(|s| s.active == desired && s.error.is_none()) {
-        with(|s| s.shown = desired);
+    if with(slot, |s| s.active == desired && s.error.is_none()) {
+        with(slot, |s| s.shown = desired);
         return Ok(());
     }
-    let (old, old_shown, old_error) = with(|s| (s.active, s.shown, s.error.clone()));
+    let (old, old_shown, old_error) = with(slot, |s| (s.active, s.shown, s.error.clone()));
     if old.is_some() {
         unsafe {
-            let _ = UnregisterHotKey(Some(hwnd), REGISTER_ID);
+            let _ = UnregisterHotKey(Some(hwnd), slot.id());
         }
     }
     let result = match desired {
-        Some(hk) => register(hwnd, hk),
+        Some(hk) => register(hwnd, slot, hk),
         None => Ok(()),
     };
     match &result {
         Ok(()) => {
-            with(|s| {
+            with(slot, |s| {
                 s.active = desired;
                 s.shown = desired;
                 s.error = None;
             });
             match desired {
-                Some(hk) => log(format!("hotkey changed: {}", hk.text())),
-                None => log("hotkey cleared"),
+                Some(hk) => log(format!("hotkey {} changed: {}", slot.name(), hk.text())),
+                None => log(format!("hotkey {} cleared", slot.name())),
             }
         }
         Err(e) => {
             // Put the previous shortcut back; if that fails too, nothing is
             // registered and the tooltip must say so.
             let restored = match old {
-                Some(old) => register(hwnd, old),
+                Some(old) => register(hwnd, slot, old),
                 None => Ok(()),
             };
             match restored {
                 // The last good state (and a startup failure's message) as it
                 // was: the dialog shows this attempt's error.
-                Ok(()) => with(|s| {
+                Ok(()) => with(slot, |s| {
                     s.active = old;
                     s.shown = old_shown;
                     s.error = old_error;
                 }),
                 Err(re) => {
-                    log(format!("hotkey: could not restore the previous shortcut: {re}"));
-                    with(|s| {
+                    log(format!(
+                        "hotkey {}: could not restore the previous shortcut: {re}",
+                        slot.name()
+                    ));
+                    with(slot, |s| {
                         s.active = None;
                         s.shown = old_shown;
                         s.error = Some(re);
                     });
                 }
             }
-            log(format!("hotkey change failed: {e}"));
+            log(format!("hotkey {} change failed: {e}", slot.name()));
         }
     }
     result
 }
 
-fn register(hwnd: HWND, hk: Hotkey) -> Result<(), String> {
-    unsafe { RegisterHotKey(Some(hwnd), REGISTER_ID, hk.modifiers(), hk.vk) }
+fn register(hwnd: HWND, slot: Slot, hk: Hotkey) -> Result<(), String> {
+    unsafe { RegisterHotKey(Some(hwnd), slot.id(), hk.modifiers(), hk.vk) }
         .map_err(|e| describe(hk, &e))
 }
 
-/// Release the shortcut when the resident quits.
+/// Release both shortcuts when the resident quits.
 pub fn unregister(hwnd: HWND) {
-    unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), REGISTER_ID);
+    for slot in Slot::ALL {
+        unsafe {
+            let _ = UnregisterHotKey(Some(hwnd), slot.id());
+        }
+        with(slot, |s| *s = State::default());
     }
-    with(|s| {
-        s.active = None;
-        s.shown = None;
-        s.error = None;
-    });
 }
 
 fn describe(hk: Hotkey, e: &windows::core::Error) -> String {
@@ -455,6 +524,7 @@ mod tests {
             "Win+F",
             "Win+Shift+D",
             "Alt+D",
+            "Alt+V",
             "Ctrl+D",
             "Ctrl+Shift+C",
             "Ctrl+Shift+V",
@@ -522,5 +592,39 @@ mod tests {
         assert!(m.contains(MOD_WIN));
         assert!(m.contains(MOD_NOREPEAT));
         assert!(!Hotkey::DEFAULT.modifiers().contains(MOD_WIN));
+    }
+
+    #[test]
+    fn slots_have_distinct_ids_that_map_back() {
+        assert_ne!(Slot::Shelf.id(), Slot::History.id());
+        assert_eq!(Slot::Shelf.id(), REGISTER_ID);
+        for slot in Slot::ALL {
+            assert_eq!(Slot::from_id(slot.id()), Some(slot));
+        }
+        assert_eq!(Slot::from_id(0), None);
+    }
+
+    #[test]
+    fn same_chord_for_both_is_refused() {
+        let alt_v = Hotkey::parse("Alt+V");
+        let reason = refusal(Slot::History, alt_v, alt_v).unwrap();
+        assert_eq!(reason, "Alt+V is already the shelf shortcut. Pick another.");
+        let reason = refusal(Slot::Shelf, alt_v, alt_v).unwrap();
+        assert!(reason.contains("history shortcut"), "{reason}");
+        assert_eq!(refusal(Slot::History, alt_v, Some(Hotkey::DEFAULT)), None);
+        assert_eq!(refusal(Slot::History, alt_v, None), None);
+        assert_eq!(
+            refusal(Slot::History, None, alt_v),
+            None,
+            "clearing is fine"
+        );
+    }
+
+    #[test]
+    fn unsafe_chord_is_refused_for_either_slot() {
+        let shift_d = Hotkey::parse("Shift+D");
+        for slot in Slot::ALL {
+            assert_eq!(refusal(slot, shift_d, None).as_deref(), Some(NEED_MODIFIER));
+        }
     }
 }
