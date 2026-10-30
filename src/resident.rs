@@ -17,7 +17,7 @@ use crate::log::{log, now_ms, truncate};
 use crate::proto::{
     CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SETTINGS_SAVED, WM_SHOW, WM_TOGGLE,
 };
-use crate::{hotkey, park, settings, settings_win, shelf, tray};
+use crate::{history, hotkey, park, settings, settings_win, shelf, tray};
 
 /// Caps+D while resident.
 fn on_toggle(_hwnd: HWND) {
@@ -34,6 +34,9 @@ fn on_show(_hwnd: HWND) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if let Some(r) = shelf::handle(hwnd, msg, wp, lp) {
+            return r;
+        }
+        if let Some(r) = history::handle(hwnd, msg, wp, lp) {
             return r;
         }
         if msg == tray::taskbar_created() {
@@ -73,6 +76,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_DESTROY => {
                 tray::remove();
                 hotkey::unregister(hwnd);
+                history::destroy(hwnd);
                 settings_win::close();
                 park::revoke(hwnd);
                 shelf::destroy();
@@ -152,6 +156,16 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             configured.shortcut,
             Some(hotkey::Hotkey::DEFAULT),
         );
+        // The History: its window, the clipboard listener and Alt+V. A taken
+        // Alt+V (another clipboard manager) is logged by `hotkey::start`; the
+        // History still works through the show message.
+        match history::create(hwnd) {
+            Ok(()) => {
+                let hk = hotkey::Hotkey::HISTORY_DEFAULT;
+                let _ = hotkey::start(hwnd, hotkey::Slot::History, Some(hk), Some(hk));
+            }
+            Err(e) => log(format!("history failed to start, no History shortcut: {e:?}")),
+        }
         let (shortcut, shortcut_error) = hotkey::display(hotkey::Slot::Shelf);
         tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref(), None));
         #[cfg(debug_assertions)]

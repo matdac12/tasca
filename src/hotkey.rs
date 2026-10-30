@@ -39,6 +39,15 @@ impl Hotkey {
         vk: b'D' as u32,
     };
 
+    /// The History's shortcut until Settings can change it: Alt+V.
+    pub const HISTORY_DEFAULT: Hotkey = Hotkey {
+        ctrl: false,
+        alt: true,
+        shift: false,
+        win: false,
+        vk: b'V' as u32,
+    };
+
     pub fn modifiers(&self) -> HOT_KEY_MODIFIERS {
         let mut m = MOD_NOREPEAT;
         if self.ctrl {
@@ -454,6 +463,14 @@ mod tests {
         assert_eq!(Hotkey::DEFAULT.text(), "Ctrl+Alt+D");
         assert_eq!(Hotkey::parse("Ctrl+Alt+D"), Some(Hotkey::DEFAULT));
         assert!(Hotkey::DEFAULT.is_safe());
+    }
+
+    #[test]
+    fn history_default_is_alt_v_and_safe() {
+        assert_eq!(Hotkey::HISTORY_DEFAULT.text(), "Alt+V");
+        assert_eq!(Hotkey::parse("Alt+V"), Some(Hotkey::HISTORY_DEFAULT));
+        assert!(Hotkey::HISTORY_DEFAULT.is_safe());
+        assert_ne!(Hotkey::HISTORY_DEFAULT, Hotkey::DEFAULT);
     }
 
     #[test]
