@@ -215,6 +215,7 @@ impl Machine {
                 self.edited()
             }
             Key::Esc => self.close(),
+            Key::Backspace if self.query.is_empty() => Vec::new(),
             Key::Backspace => {
                 if mods.ctrl {
                     search::delete_word(&mut self.query);
@@ -552,7 +553,7 @@ mod tests {
         assert_eq!(m.query(), "inv ");
         m.go(chord(Key::Backspace, false, true, false));
         assert_eq!(m.query(), "");
-        assert_eq!(m.go(press(Key::Backspace)), [Effect::Redraw]);
+        assert!(m.go(press(Key::Backspace)).is_empty());
     }
 
     #[test]

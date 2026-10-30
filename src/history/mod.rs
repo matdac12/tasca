@@ -67,7 +67,7 @@ struct Shell {
 
 impl Shell {
     fn layout(&self) -> Layout {
-        Layout::new(self.scale, self.machine.shown().len(), 0, !self.machine.query().is_empty())
+        Layout::new(self.scale, self.machine.shown().len(), 0, !self.machine.query().trim().is_empty())
     }
 }
 

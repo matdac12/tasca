@@ -43,6 +43,9 @@ thread_local! {
     static HIGH_SURROGATE: Cell<u16> = const { Cell::new(0) };
 }
 
+/// Bit 30 of a key message's `lParam`: the key was already down.
+const KEY_REPEAT: isize = 1 << 30;
+
 /// `MK_SHIFT` in a mouse message's `wParam`.
 const MK_SHIFT: usize = 0x0004;
 
@@ -289,6 +292,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 let mods = mods_now();
                 match key_of(wp.0 as u16, mods) {
+                    // A held Esc or Enter must not clear, then close (or paste twice).
+                    Some(Key::Esc | Key::Enter) if lp.0 & KEY_REPEAT != 0 => LRESULT(0),
                     Some(key) => {
                         super::dispatch(Event::Key(key, mods));
                         LRESULT(0)
