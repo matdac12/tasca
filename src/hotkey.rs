@@ -364,6 +364,43 @@ pub fn start(
     result
 }
 
+/// Registration failed again for the shortcut the user already had (chosen, but
+/// never registered): nothing changed, so the apply that carries it must not
+/// fail (Mattia still runs ClipClip, which holds Alt+V).
+fn keeps_failing(old_active: Option<Hotkey>, old_shown: Option<Hotkey>, desired: Option<Hotkey>) -> bool {
+    desired.is_some() && old_active.is_none() && old_shown == desired
+}
+
+/// A slot's whole state, to put back after a failed Settings apply.
+#[derive(Clone)]
+pub struct Snapshot(State);
+
+pub fn snapshot(slot: Slot) -> Snapshot {
+    Snapshot(with(slot, |s| s.clone()))
+}
+
+/// Put `slot` back exactly as `snapshot` saw it: re-register only the old
+/// `active` shortcut (never the chosen-but-failed one), keep `shown` and the error.
+pub fn restore(hwnd: HWND, slot: Slot, snap: Snapshot) {
+    let Snapshot(mut old) = snap;
+    let now = with(slot, |s| s.active);
+    if now != old.active {
+        if now.is_some() {
+            unsafe {
+                let _ = UnregisterHotKey(Some(hwnd), slot.id());
+            }
+        }
+        if let Some(hk) = old.active {
+            if let Err(e) = register(hwnd, slot, hk) {
+                log(format!("hotkey {}: could not restore {}: {e}", slot.name(), hk.text()));
+                old.active = None;
+                old.error = Some(e);
+            }
+        }
+    }
+    with(slot, |s| *s = old);
+}
+
 /// Settings OK: switch to `desired` now. On failure the previously registered
 /// shortcut is put back, so a taken combination never leaves Tasca with none.
 pub fn change(hwnd: HWND, slot: Slot, desired: Option<Hotkey>) -> Result<(), String> {
@@ -426,6 +463,10 @@ pub fn change(hwnd: HWND, slot: Slot, desired: Option<Hotkey>) -> Result<(), Str
             }
             log(format!("hotkey {} change failed: {e}", slot.name()));
         }
+    }
+    if result.is_err() && keeps_failing(old, old_shown, desired) {
+        log(format!("hotkey {}: still unavailable, unchanged: not an error for this apply", slot.name()));
+        return Ok(());
     }
     result
 }
@@ -643,5 +684,19 @@ mod tests {
         for slot in Slot::ALL {
             assert_eq!(refusal(slot, shift_d, None).as_deref(), Some(NEED_MODIFIER));
         }
+    }
+
+    #[test]
+    fn an_unchanged_shortcut_that_never_registered_does_not_fail_the_apply() {
+        let alt_v = Some(Hotkey::HISTORY_DEFAULT);
+        let other = Some(Hotkey::DEFAULT);
+        // Chosen at startup (shown), never registered (active none), same again.
+        assert!(keeps_failing(None, alt_v, alt_v));
+        // A different shortcut that fails is a real error.
+        assert!(!keeps_failing(None, alt_v, other));
+        // One that was working and now fails to re-register is a real error.
+        assert!(!keeps_failing(alt_v, alt_v, alt_v));
+        // Clearing never fails.
+        assert!(!keeps_failing(None, alt_v, None));
     }
 }

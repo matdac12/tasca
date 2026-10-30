@@ -31,7 +31,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::hotkey::{self, Hotkey};
+use crate::hotkey::{self, Hotkey, Slot};
 use crate::log::{log, now_ms};
 use crate::proto::{WM_RECORD_STOP, WM_SETTINGS_SAVED};
 use crate::{settings, startup, tray};
@@ -45,10 +45,18 @@ const ID_CLEAR: i32 = 101;
 const ID_START: i32 = 102;
 const ID_STATUS: i32 = 103;
 const ID_VERSION: i32 = 104;
+const ID_HISTORY_HOTKEY: i32 = 105;
+const ID_HISTORY_CLEAR: i32 = 106;
+const ID_HISTORY: i32 = 107;
+const ID_SKIP_PRIVATE: i32 = 108;
+const ID_HISTORY_TITLE: i32 = 109;
 // The dialog manager (`IsDialogMessageW`) sends WM_COMMAND with IDOK (1) for
 // Enter and IDCANCEL (2) for Esc, so the buttons use exactly those ids.
 const ID_OK: i32 = 1;
 const ID_CANCEL: i32 = 2;
+
+/// Client height in DIP: two shortcut fields, the status line, three checkboxes and the buttons.
+const CLIENT_H: i32 = 318;
 
 const HINT: &str = "Click the field or press Enter, then press the shortcut. Esc cancels.";
 const KEY_UNUSABLE: &str = "That key cannot be used in a shortcut.";
@@ -79,7 +87,9 @@ struct Ui {
     parent: HWND,
     dpi: u32,
     /// What OK will apply.
-    pending: Option<Hotkey>,
+    pending: [Option<Hotkey>; 2],
+    /// Which shortcut the recorder is recording.
+    slot: Slot,
     /// "Start with Windows" when the window opened.
     start_at_open: bool,
     recording: bool,
@@ -104,11 +114,35 @@ struct Handles {
     title: HWND,
     field: HWND,
     clear: HWND,
+    history_title: HWND,
+    history_field: HWND,
+    history_clear: HWND,
     status_ctl: HWND,
     start_ctl: HWND,
+    history_ctl: HWND,
+    skip_ctl: HWND,
     version: HWND,
     ok: HWND,
     cancel: HWND,
+}
+
+impl Handles {
+    /// The field that records `slot`'s shortcut.
+    fn field_of(&self, slot: Slot) -> HWND {
+        match slot {
+            Slot::Shelf => self.field,
+            Slot::History => self.history_field,
+        }
+    }
+}
+
+/// Which shortcut a field control records, from its control id.
+fn slot_of_id(id: i32) -> Slot {
+    if id == ID_HISTORY_HOTKEY {
+        Slot::History
+    } else {
+        Slot::Shelf
+    }
 }
 
 /// Serialises the background apply workers (see `on_ok`).
@@ -222,31 +256,51 @@ unsafe fn build_children(
         let title = child(
             hwnd,
             w!("STATIC"),
-            w!("Keyboard shortcut"),
+            w!("Shelf shortcut"),
             WS_CHILD | WS_VISIBLE,
             ID_HOTKEY - 1,
             font_bold,
         )?;
-        let field = CreateWindowExW(
-            WINDOW_EX_STYLE(0),
-            FIELD_CLASS,
-            PCWSTR::null(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-            0,
-            0,
-            0,
-            0,
-            Some(hwnd),
-            Some(HMENU(ID_HOTKEY as isize as *mut _)),
-            Some(hinst),
-            None,
-        )?;
+        let hotkey_field = |id: i32| {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                FIELD_CLASS,
+                PCWSTR::null(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                Some(HMENU(id as isize as *mut _)),
+                Some(hinst),
+                None,
+            )
+        };
+        let field = hotkey_field(ID_HOTKEY)?;
         let clear = child(
             hwnd,
             w!("BUTTON"),
             w!("Clear"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP,
             ID_CLEAR,
+            font,
+        )?;
+        let history_title = child(
+            hwnd,
+            w!("STATIC"),
+            w!("History shortcut"),
+            WS_CHILD | WS_VISIBLE,
+            ID_HISTORY_TITLE,
+            font_bold,
+        )?;
+        let history_field = hotkey_field(ID_HISTORY_HOTKEY)?;
+        let history_clear = child(
+            hwnd,
+            w!("BUTTON"),
+            w!("Clear"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            ID_HISTORY_CLEAR,
             font,
         )?;
         let status_ctl = child(
@@ -263,6 +317,22 @@ unsafe fn build_children(
             w!("Start with Windows"),
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
             ID_START,
+            font,
+        )?;
+        let history_ctl = child(
+            hwnd,
+            w!("BUTTON"),
+            w!("Clipboard history"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            ID_HISTORY,
+            font,
+        )?;
+        let skip_ctl = child(
+            hwnd,
+            w!("BUTTON"),
+            w!("Skip private copies (password managers)"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_AUTOCHECKBOX as u32),
+            ID_SKIP_PRIVATE,
             font,
         )?;
         let version = child(
@@ -293,8 +363,13 @@ unsafe fn build_children(
             title,
             field,
             clear,
+            history_title,
+            history_field,
+            history_clear,
             status_ctl,
             start_ctl,
+            history_ctl,
+            skip_ctl,
             version,
             ok,
             cancel,
@@ -316,7 +391,7 @@ fn create(parent: HWND) -> windows::core::Result<()> {
             left: 0,
             top: 0,
             right: px(dpi, 420),
-            bottom: px(dpi, 200),
+            bottom: px(dpi, CLIENT_H),
         };
         let _ = AdjustWindowRectExForDpi(&mut rc, style, false, exstyle, monitor_dpi);
         let w = rc.right - rc.left;
@@ -340,7 +415,16 @@ fn create(parent: HWND) -> windows::core::Result<()> {
             None,
         )?;
 
-        let (shortcut, error) = hotkey::display(hotkey::Slot::Shelf);
+        let (shortcut, shelf_error) = hotkey::display(Slot::Shelf);
+        // What the resident runs with. The History's shortcut comes from the
+        // settings, not the hotkey module: it stays chosen while History is off.
+        let current = settings::current();
+        let history_error = if current.history {
+            hotkey::display(Slot::History).1
+        } else {
+            None
+        };
+        let error = shelf_error.or(history_error);
         let font = make_font(dpi, false);
         let font_bold = make_font(dpi, true);
         let focus_brush = CreateSolidBrush(FOCUS_COLOR);
@@ -365,7 +449,8 @@ fn create(parent: HWND) -> windows::core::Result<()> {
             hwnd,
             parent,
             dpi,
-            pending: shortcut,
+            pending: [shortcut, current.history_shortcut],
+            slot: Slot::Shelf,
             start_at_open,
             recording: false,
             finishing: false,
@@ -389,6 +474,9 @@ fn create(parent: HWND) -> windows::core::Result<()> {
             Some(WPARAM(usize::from(start_at_open))),
             None,
         );
+        for (ctl, on) in [(kids.history_ctl, current.history), (kids.skip_ctl, current.skip_private)] {
+            SendMessageW(ctl, BM_SETCHECK, Some(WPARAM(usize::from(on))), None);
+        }
 
         if let Some(icon) = tray::load_icon(false) {
             SendMessageW(
@@ -545,7 +633,7 @@ fn relayout(hwnd: HWND) {
             left: 0,
             top: 0,
             right: s(420),
-            bottom: s(200),
+            bottom: s(CLIENT_H),
         };
         let _ = AdjustWindowRectExForDpi(
             &mut rc,
@@ -579,11 +667,16 @@ fn relayout(hwnd: HWND) {
         place(k.title, 16, 16, 388, 20);
         place(k.field, 16, 40, 296, 30);
         place(k.clear, 324, 40, 80, 30);
-        place(k.status_ctl, 16, 78, 388, 34);
-        place(k.start_ctl, 16, 122, 388, 24);
-        place(k.version, 16, 166, 200, 18);
-        place(k.ok, 224, 162, 80, 28);
-        place(k.cancel, 320, 162, 84, 28);
+        place(k.history_title, 16, 82, 388, 20);
+        place(k.history_field, 16, 106, 296, 30);
+        place(k.history_clear, 324, 106, 80, 30);
+        place(k.status_ctl, 16, 144, 388, 34);
+        place(k.start_ctl, 16, 186, 388, 24);
+        place(k.history_ctl, 16, 212, 388, 24);
+        place(k.skip_ctl, 16, 238, 388, 24);
+        place(k.version, 16, 282, 200, 18);
+        place(k.ok, 224, 278, 80, 28);
+        place(k.cancel, 320, 278, 84, 28);
     }
 }
 
@@ -605,7 +698,17 @@ fn refont(dpi: u32) {
         return;
     };
     unsafe {
-        for ctl in [k.clear, k.status_ctl, k.start_ctl, k.version, k.ok, k.cancel] {
+        for ctl in [
+            k.clear,
+            k.history_clear,
+            k.status_ctl,
+            k.start_ctl,
+            k.history_ctl,
+            k.skip_ctl,
+            k.version,
+            k.ok,
+            k.cancel,
+        ] {
             SendMessageW(
                 ctl,
                 WM_SETFONT,
@@ -613,12 +716,14 @@ fn refont(dpi: u32) {
                 Some(LPARAM(1)),
             );
         }
-        SendMessageW(
-            k.title,
-            WM_SETFONT,
-            Some(WPARAM(bold.0 as usize)),
-            Some(LPARAM(1)),
-        );
+        for ctl in [k.title, k.history_title] {
+            SendMessageW(
+                ctl,
+                WM_SETFONT,
+                Some(WPARAM(bold.0 as usize)),
+                Some(LPARAM(1)),
+            );
+        }
         let _ = DeleteObject(HGDIOBJ(old.0));
         let _ = DeleteObject(HGDIOBJ(old_bold.0));
     }
@@ -645,10 +750,11 @@ unsafe fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT
                     ID_CANCEL => {
                         let _ = unsafe { DestroyWindow(hwnd) };
                     }
-                    ID_CLEAR => {
+                    ID_CLEAR | ID_HISTORY_CLEAR => {
+                        let slot = if id == ID_CLEAR { Slot::Shelf } else { Slot::History };
                         let field = with_ui(|ui| {
-                            ui.pending = None;
-                            ui.h.field
+                            ui.pending[slot as usize] = None;
+                            ui.h.field_of(slot)
                         });
                         set_status(HINT, false);
                         if let Some(field) = field {
@@ -750,25 +856,69 @@ fn cleanup() {
 }
 
 fn on_ok(hwnd: HWND) {
-    let Some((pending, start_ctl, start_at_open, parent, field)) =
-        with_ui(|ui| (ui.pending, ui.h.start_ctl, ui.start_at_open, ui.parent, ui.h.field))
+    let Some((pending, kids, start_at_open, parent)) =
+        with_ui(|ui| (ui.pending, ui.h, ui.start_at_open, ui.parent))
     else {
         return;
     };
-    let checked = unsafe { SendMessageW(start_ctl, BM_GETCHECK, None, None) }.0 == 1;
-    if let Err(e) = hotkey::change(parent, hotkey::Slot::Shelf, pending) {
-        set_status(&e, true);
+    let is_checked = |ctl: HWND| unsafe { SendMessageW(ctl, BM_GETCHECK, None, None) }.0 == 1;
+    let checked = is_checked(kids.start_ctl);
+    let history_on = is_checked(kids.history_ctl);
+    let skip_private = is_checked(kids.skip_ctl);
+    let refuse = |slot: Slot, e: &str| {
+        let field = kids.field_of(slot);
+        set_status(e, true);
         invalidate(field);
         let _ = unsafe { SetFocus(Some(field)) };
+    };
+    // `change` compares a new chord with the other slot's live one, so the
+    // order matters when one pending chord is the other slot's current one.
+    // (No `UI` borrow is held across these calls: they pump messages.)
+    let history_shortcut = pending[Slot::History as usize];
+    let shelf_snapshot = hotkey::snapshot(Slot::Shelf);
+    let history_backup = crate::resident::history_backup();
+    let history_first = history_goes_first(
+        pending[Slot::Shelf as usize],
+        pending[Slot::History as usize],
+        hotkey::display(Slot::History).0,
+    );
+    let apply_shelf = || hotkey::change(parent, Slot::Shelf, pending[Slot::Shelf as usize]);
+    let apply_history = || crate::resident::set_history(parent, history_on, history_shortcut);
+    // A step that fails restores itself; the one that already succeeded is
+    // put back here, because nothing is saved after a failure.
+    let failure = if history_first {
+        apply_history().err().map(|e| (Slot::History, e)).or_else(|| {
+            apply_shelf().err().map(|e| {
+                crate::resident::restore_history(parent, history_backup);
+                (Slot::Shelf, e)
+            })
+        })
+    } else {
+        apply_shelf().err().map(|e| (Slot::Shelf, e)).or_else(|| {
+            apply_history().err().map(|e| {
+                hotkey::restore(parent, Slot::Shelf, shelf_snapshot);
+                (Slot::History, e)
+            })
+        })
+    };
+    if let Some((slot, e)) = failure {
+        refuse(slot, &e);
+        tray::refresh();
         return;
     }
+    let saved = settings::Settings {
+        shortcut: pending[Slot::Shelf as usize],
+        history: history_on,
+        history_shortcut,
+        skip_private,
+    };
+    settings::set_current(saved);
     tray::refresh();
 
     // The Startup shortcut and the ini are written off the UI thread; the
     // outcome comes back as WM_SETTINGS_SAVED and a failure shows in the tray
     // tooltip (the window is already gone by then).
     let start_change = checked != start_at_open;
-    let saved = settings::Settings { shortcut: pending };
     let resident = parent.0 as isize;
     std::thread::spawn(move || {
         // One apply at a time: two quick OKs must not share settings.ini.tmp
@@ -801,6 +951,18 @@ fn on_ok(hwnd: HWND) {
     let _ = unsafe { DestroyWindow(hwnd) };
 }
 
+/// Apply the History first when the Shelf's new chord is the one the History
+/// has now and the History is moving off it (the user freed Alt+V in the
+/// History field and took it in the Shelf field). Otherwise the Shelf goes
+/// first, which also covers the reverse case.
+fn history_goes_first(
+    pending_shelf: Option<Hotkey>,
+    pending_history: Option<Hotkey>,
+    live_history: Option<Hotkey>,
+) -> bool {
+    pending_shelf.is_some() && pending_shelf == live_history && pending_history != live_history
+}
+
 fn invalidate(hwnd: HWND) {
     if !hwnd.is_invalid() {
         unsafe {
@@ -813,8 +975,8 @@ fn invalidate(hwnd: HWND) {
 
 /// Start recording; `trigger` is the key that started it (its auto-repeat is
 /// ignored until it is released), `None` for a mouse click.
-fn start_recording(trigger: Option<u32>) {
-    let Some((hwnd, field, already)) = with_ui(|ui| (ui.hwnd, ui.h.field, ui.recording)) else {
+fn start_recording(slot: Slot, trigger: Option<u32>) {
+    let Some((hwnd, field, already)) = with_ui(|ui| (ui.hwnd, ui.h.field_of(slot), ui.recording)) else {
         return;
     };
     if already {
@@ -824,6 +986,7 @@ fn start_recording(trigger: Option<u32>) {
         Ok(hook) => {
             with_ui(|ui| {
                 ui.recording = true;
+                ui.slot = slot;
                 ui.finishing = false;
                 ui.skip_vk = trigger;
                 ui.mods = (false, false, false, false);
@@ -852,7 +1015,7 @@ fn end_recording() -> Option<Option<Hotkey>> {
         ui.finishing = false;
         ui.skip_vk = None;
         ui.mods = (false, false, false, false);
-        Some((ui.hook.take(), ui.hwnd, ui.h.field, ui.pending))
+        Some((ui.hook.take(), ui.hwnd, ui.h.field_of(ui.slot), ui.pending[ui.slot as usize]))
     })??;
     let (hook, hwnd, field, pending) = ended;
     unsafe {
@@ -923,7 +1086,7 @@ fn decide(ui: &mut Ui, vk: u32, down: bool) -> (HookAction, Option<(String, bool
     }
     let (ctrl, alt, shift, win) = ui.mods;
     if (vk == VK_BACK.0 as u32 || vk == VK_DELETE.0 as u32) && !(ctrl || alt || shift || win) {
-        ui.pending = None;
+        ui.pending[ui.slot as usize] = None;
         ui.finishing = true;
         return (
             HookAction::SwallowAndStop,
@@ -943,10 +1106,12 @@ fn decide(ui: &mut Ui, vk: u32, down: bool) -> (HookAction, Option<(String, bool
         win,
         vk,
     };
-    if let Some(reason) = hk.unsafe_reason() {
+    // Unsafe, or the same chord as the other field's shortcut.
+    let recording = ui.slot as usize;
+    if let Some(reason) = hotkey::refusal(ui.slot, Some(hk), ui.pending[1 - recording]) {
         return (HookAction::Swallow, Some((reason, true)));
     }
-    ui.pending = Some(hk);
+    ui.pending[recording] = Some(hk);
     ui.finishing = true;
     (HookAction::SwallowAndStop, Some((HINT.to_string(), false)))
 }
@@ -970,7 +1135,7 @@ unsafe extern "system" fn hook_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESUL
             return None;
         }
         let (action, status) = decide(ui, kb.vkCode, down);
-        Some((action, status, ui.h.field, ui.hwnd))
+        Some((action, status, ui.h.field_of(ui.slot), ui.hwnd))
     });
     let Some((action, status, field, hwnd)) = decided else {
         return unsafe { CallNextHookEx(None, code, wp, lp) };
@@ -1054,11 +1219,12 @@ fn recording_text(ui: &Ui) -> String {
     s
 }
 
-fn field_text(ui: &Ui) -> (String, bool) {
-    if ui.recording {
+/// What the field of `slot` shows: the keys held while it records, else its shortcut.
+fn field_text(ui: &Ui, slot: Slot) -> (String, bool) {
+    if ui.recording && ui.slot == slot {
         return (recording_text(ui), true);
     }
-    match ui.pending {
+    match ui.pending[slot as usize] {
         Some(hk) => (hk.text(), false),
         None => ("None".to_string(), false),
     }
@@ -1086,7 +1252,7 @@ unsafe extern "system" fn field_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
             }),
             WM_LBUTTONDOWN => {
                 let _ = SetFocus(Some(hwnd));
-                start_recording(None);
+                start_recording(slot_of_id(GetDlgCtrlID(hwnd)), None);
                 LRESULT(0)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN => match wp.0 as u32 {
@@ -1106,7 +1272,7 @@ unsafe extern "system" fn field_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
                     LRESULT(0)
                 }
                 v if v == VK_RETURN.0 as u32 || v == VK_SPACE.0 as u32 => {
-                    start_recording(Some(v));
+                    start_recording(slot_of_id(GetDlgCtrlID(hwnd)), Some(v));
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1135,8 +1301,9 @@ fn paint_field(hwnd: HWND) {
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
         let focused = GetFocus() == hwnd;
+        let slot = slot_of_id(GetDlgCtrlID(hwnd));
         let (text, gray, dpi, focus_brush, font) = with_ui(|ui| {
-            let (text, placeholder) = field_text(ui);
+            let (text, placeholder) = field_text(ui, slot);
             (text, placeholder, ui.dpi, ui.focus_brush, ui.font)
         })
         .unwrap_or((
@@ -1200,7 +1367,8 @@ mod tests {
             hwnd: h,
             parent: h,
             dpi: 96,
-            pending: Some(Hotkey::DEFAULT),
+            pending: [Some(Hotkey::DEFAULT), Some(Hotkey::HISTORY_DEFAULT)],
+            slot: Slot::Shelf,
             start_at_open: false,
             recording: true,
             finishing: false,
@@ -1216,8 +1384,13 @@ mod tests {
                 title: h,
                 field: h,
                 clear: h,
+                history_title: h,
+                history_field: h,
+                history_clear: h,
                 status_ctl: h,
                 start_ctl: h,
+                history_ctl: h,
+                skip_ctl: h,
                 version: h,
                 ok: h,
                 cancel: h,
@@ -1250,10 +1423,10 @@ mod tests {
         let (action, status) = decide(&mut ui, b'F' as u32, true);
         assert_eq!(action, HookAction::SwallowAndStop);
         assert_eq!(status, Some((HINT.to_string(), false)));
-        assert_eq!(ui.pending, Hotkey::parse("Ctrl+Alt+F"));
+        assert_eq!(ui.pending[0], Hotkey::parse("Ctrl+Alt+F"));
         // Everything after the decision is swallowed until the field stops.
         assert_eq!(decide(&mut ui, b'G' as u32, true).0, HookAction::Swallow);
-        assert_eq!(ui.pending, Hotkey::parse("Ctrl+Alt+F"));
+        assert_eq!(ui.pending[0], Hotkey::parse("Ctrl+Alt+F"));
     }
 
     #[test]
@@ -1265,7 +1438,7 @@ mod tests {
         let (text, error) = status.unwrap();
         assert!(error);
         assert_eq!(text, hotkey::NEED_MODIFIER);
-        assert_eq!(ui.pending, Some(Hotkey::DEFAULT), "pending untouched");
+        assert_eq!(ui.pending[0], Some(Hotkey::DEFAULT), "pending untouched");
         assert!(!ui.finishing);
 
         let mut ui = blank();
@@ -1280,12 +1453,100 @@ mod tests {
     }
 
     #[test]
+    fn the_history_field_records_into_its_own_slot() {
+        let mut ui = blank();
+        ui.slot = Slot::History;
+        decide(&mut ui, ALT, true);
+        let (action, _) = decide(&mut ui, b'H' as u32, true);
+        assert_eq!(action, HookAction::SwallowAndStop);
+        assert_eq!(ui.pending[1], Hotkey::parse("Alt+H"));
+        assert_eq!(ui.pending[0], Some(Hotkey::DEFAULT), "the Shelf's is untouched");
+    }
+
+    #[test]
+    fn the_history_field_refuses_the_shelfs_chord_and_the_other_way_round() {
+        let mut ui = blank();
+        ui.slot = Slot::History;
+        decide(&mut ui, CTRL, true);
+        decide(&mut ui, ALT, true);
+        let (action, status) = decide(&mut ui, b'D' as u32, true);
+        assert_eq!(action, HookAction::Swallow, "keeps recording");
+        let (text, error) = status.unwrap();
+        assert!(error && text.contains("already the shelf shortcut"), "{text}");
+        assert_eq!(ui.pending[1], Some(Hotkey::HISTORY_DEFAULT));
+
+        let mut ui = blank();
+        decide(&mut ui, ALT, true);
+        let (action, status) = decide(&mut ui, b'V' as u32, true);
+        assert_eq!(action, HookAction::Swallow);
+        assert!(status.unwrap().0.contains("already the history shortcut"));
+        assert_eq!(ui.pending[0], Some(Hotkey::DEFAULT));
+    }
+
+    #[test]
+    fn the_history_field_applies_the_safe_shortcut_rule_and_clears_with_delete() {
+        let mut ui = blank();
+        ui.slot = Slot::History;
+        decide(&mut ui, SHIFT, true);
+        assert!(decide(&mut ui, b'V' as u32, true).1.unwrap().1, "Shift+V is unsafe");
+
+        let mut ui = blank();
+        ui.slot = Slot::History;
+        assert_eq!(decide(&mut ui, VK_DELETE.0 as u32, true).0, HookAction::SwallowAndStop);
+        assert_eq!(ui.pending[1], None);
+        assert_eq!(ui.pending[0], Some(Hotkey::DEFAULT));
+    }
+
+    #[test]
+    fn only_the_recording_field_shows_the_keys_held() {
+        let mut ui = blank();
+        ui.slot = Slot::History;
+        decide(&mut ui, CTRL, true);
+        assert_eq!(field_text(&ui, Slot::History), ("Ctrl+\u{2026}".to_string(), true));
+        assert_eq!(field_text(&ui, Slot::Shelf), ("Ctrl+Alt+D".to_string(), false));
+    }
+
+    #[test]
+    fn field_ids_map_to_their_slots() {
+        assert_eq!(slot_of_id(ID_HOTKEY), Slot::Shelf);
+        assert_eq!(slot_of_id(ID_HISTORY_HOTKEY), Slot::History);
+    }
+
+    #[test]
+    fn control_ids_are_distinct() {
+        let ids = [
+            ID_HOTKEY - 1, ID_HOTKEY, ID_CLEAR, ID_START, ID_STATUS, ID_VERSION, ID_HISTORY_HOTKEY,
+            ID_HISTORY_CLEAR, ID_HISTORY, ID_SKIP_PRIVATE, ID_HISTORY_TITLE, ID_OK, ID_CANCEL,
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            assert!(ids[i + 1..].iter().all(|b| a != b), "{a} used twice");
+        }
+    }
+
+    #[test]
+    fn the_history_moves_first_when_the_shelf_takes_its_current_chord() {
+        let alt_v = Hotkey::parse("Alt+V");
+        let ctrl_alt_h = Hotkey::parse("Ctrl+Alt+H");
+        let ctrl_alt_d = Hotkey::parse("Ctrl+Alt+D");
+        // History moves to Ctrl+Alt+H, Shelf takes Alt+V.
+        assert!(history_goes_first(alt_v, ctrl_alt_h, alt_v));
+        // History cleared, Shelf takes Alt+V.
+        assert!(history_goes_first(alt_v, None, alt_v));
+        // Nothing of the Shelf's new chord is held by the History: usual order.
+        assert!(!history_goes_first(ctrl_alt_d, alt_v, alt_v));
+        // The History keeps the chord (the recorder already refuses the Shelf taking it).
+        assert!(!history_goes_first(alt_v, alt_v, alt_v));
+        // No Shelf shortcut.
+        assert!(!history_goes_first(None, ctrl_alt_h, None));
+    }
+
+    #[test]
     fn esc_cancels_without_changing_pending() {
         let mut ui = blank();
         let (action, status) = decide(&mut ui, VK_ESCAPE.0 as u32, true);
         assert_eq!(action, HookAction::SwallowAndStop);
         assert_eq!(status, None);
-        assert_eq!(ui.pending, Some(Hotkey::DEFAULT));
+        assert_eq!(ui.pending[0], Some(Hotkey::DEFAULT));
     }
 
     #[test]
@@ -1293,7 +1554,7 @@ mod tests {
         for vk in [VK_BACK.0 as u32, VK_DELETE.0 as u32] {
             let mut ui = blank();
             assert_eq!(decide(&mut ui, vk, true).0, HookAction::SwallowAndStop);
-            assert_eq!(ui.pending, None);
+            assert_eq!(ui.pending[0], None);
         }
     }
 
