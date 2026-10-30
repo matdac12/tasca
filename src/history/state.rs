@@ -134,6 +134,11 @@ impl Machine {
         self.selected
     }
 
+    /// The saved History has been merged in.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }

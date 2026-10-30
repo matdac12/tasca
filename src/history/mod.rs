@@ -146,6 +146,7 @@ fn start_store(resident: HWND) -> Option<Store> {
 
 pub fn destroy(resident: HWND) {
     record::stop(resident);
+    finish_load();
     with(|s| s.listening = false);
     draw::destroy();
     if let Some(shell) = SHELL.with(|c| c.borrow_mut().take()) {
@@ -172,9 +173,21 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
     Some(LRESULT(0))
 }
 
+/// Quit before the saved History was merged in: wait for the worker to finish
+/// reading, merge it and queue the save, so what was copied since start is not
+/// lost (a save is held back until the merge). A short block at quit.
+fn finish_load() {
+    if with(|s| !s.machine.is_loaded() && s.store.is_some()) != Some(true) {
+        return;
+    }
+    // The wait is on the worker only; nothing in it pumps messages.
+    with(|s| s.store.as_ref().map(Store::flush));
+    on_loaded();
+}
+
 /// The store's worker finished reading: merge the saved Clips in.
 fn on_loaded() {
-    let records = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    let Some(records) = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     let clips: Vec<Clip> = records.into_iter().filter_map(Clip::from_record).collect();
     log(format!("history: loaded {} saved clips", clips.len()));
     dispatch(Event::Loaded(clips));

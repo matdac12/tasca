@@ -1,11 +1,11 @@
 //! The History on disk: `%LOCALAPPDATA%\Tasca\history\`.
 //!
 //! Layout: one index file, `index.bin`, plus a blob file per large field
-//! (`clip-<id>-<field>.bin`: images always, big text and formats when over
-//! `INLINE_MAX`). The index is binary, little-endian:
+//! (`clip-<len>-<hash>.bin`, named by its content: images always, big text and
+//! formats when over `INLINE_MAX`). The index is binary, little-endian:
 //!
 //! ```text
-//! "TSCH"  u32 version(=1)  u32 count
+//! "TSCH"  u32 version(=2)  u32 count
 //! per record, newest first:
 //!   u64 id  u64 last_copied_ms  u8 pinned  u8 kind  u32 body_len  body
 //! ```
@@ -14,11 +14,18 @@
 //! later version can append fields to a body (readers ignore trailing bytes).
 //! Kinds: 1 text (text, optional html, optional rtf), 2 image (width, height,
 //! png), 3 files (paths). A blob field is `u8 0, u32 len, bytes` inline or
-//! `u8 1` with the bytes in the blob file.
+//! `u8 1, u64 hash, u32 len` with the bytes in the blob file of that name.
 //!
-//! Every file is written to `<name>.tmp` and renamed over the real name, the
-//! index last, so a crash leaves either the old store or the new one. Anything
-//! unreadable (truncated, garbled, wrong magic or version) loads as empty.
+//! Commit order of a save: (1) new blobs are written under their content name
+//! (a name is never reused for other bytes, so the committed index keeps
+//! pointing at the right content until it is replaced) and flushed to disk;
+//! (2) the index is written to a temp file, flushed and renamed over
+//! `index.bin`; (3) only then are blobs and temp files the new index does not
+//! name deleted. A crash leaves the old store or the new one.
+//!
+//! Anything unreadable (truncated, garbled, wrong magic or version, or over a
+//! budget: index size, record count, duplicate ids) loads as empty; a Clip
+//! whose blob is missing, changed or too big is dropped alone.
 //! All of it runs on the worker thread, never the UI thread.
 
 use std::collections::HashSet;
@@ -32,7 +39,13 @@ use std::thread;
 pub const MAX_UNPINNED: usize = 100;
 
 const MAGIC: &[u8; 4] = b"TSCH";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// Budgets for reading: an index bigger than this, more records than this
+/// (100 unpinned plus a sane number of pins) or a blob over `MAX_BLOB` (just
+/// over the 10 MB Clip cap) is not read.
+const MAX_INDEX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RECORDS: u32 = 1000;
+const MAX_BLOB: u32 = 11 * 1024 * 1024;
 const INDEX: &str = "index.bin";
 /// A blob field up to this size stays inside the index.
 const INLINE_MAX: usize = 16 * 1024;
@@ -97,28 +110,36 @@ impl Writer {
         self.u32(b.len() as u32);
         self.index.extend_from_slice(b);
     }
-    fn blob(&mut self, id: u64, field: &str, b: &[u8], inline_max: usize) {
+    fn blob(&mut self, b: &[u8], inline_max: usize) {
         if b.len() <= inline_max {
             self.u8(0);
             self.bytes(b);
         } else {
+            let (len, h) = (b.len() as u32, hash(b));
             self.u8(1);
-            self.blobs.push((blob_name(id, field), b.to_vec()));
+            self.u64(h);
+            self.u32(len);
+            self.blobs.push((blob_name(len, h), b.to_vec()));
         }
     }
-    fn opt_blob(&mut self, id: u64, field: &str, b: &Option<String>) {
+    fn opt_blob(&mut self, b: &Option<String>) {
         match b {
             None => self.u8(0),
             Some(s) => {
                 self.u8(1);
-                self.blob(id, field, s.as_bytes(), INLINE_MAX);
+                self.blob(s.as_bytes(), INLINE_MAX);
             }
         }
     }
 }
 
-fn blob_name(id: u64, field: &str) -> String {
-    format!("clip-{id}-{field}.bin")
+/// FNV-1a: names a blob by its content (and catches a changed blob file on load).
+fn hash(b: &[u8]) -> u64 {
+    b.iter().fold(0xcbf2_9ce4_8422_2325, |h, &x| (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3))
+}
+
+fn blob_name(len: u32, hash: u64) -> String {
+    format!("clip-{len:x}-{hash:016x}.bin")
 }
 
 fn encode(records: &[Record]) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
@@ -135,15 +156,15 @@ fn encode(records: &[Record]) -> (Vec<u8>, Vec<(String, Vec<u8>)>) {
         match &r.body {
             Body::Text { text, html, rtf } => {
                 w.u8(1);
-                w.blob(r.id, "text", text.as_bytes(), INLINE_MAX);
-                w.opt_blob(r.id, "html", html);
-                w.opt_blob(r.id, "rtf", rtf);
+                w.blob(text.as_bytes(), INLINE_MAX);
+                w.opt_blob(html);
+                w.opt_blob(rtf);
             }
             Body::Image { width, height, png } => {
                 w.u8(2);
                 w.u32(*width);
                 w.u32(*height);
-                w.blob(r.id, "png", png, 0);
+                w.blob(png, 0);
             }
             Body::Files { paths } => {
                 w.u8(3);
@@ -198,22 +219,39 @@ impl<'a> Reader<'a> {
 /// missing blob file).
 type Parsed = Result<Option<Record>, ()>;
 
-fn read_blob(r: &mut Reader, dir: &Path, id: u64, field: &str) -> Result<Option<Vec<u8>>, ()> {
+fn read_blob(r: &mut Reader, dir: &Path) -> Result<Option<Vec<u8>>, ()> {
     match r.u8().ok_or(())? {
         0 => Ok(Some(r.bytes().ok_or(())?.to_vec())),
-        1 => Ok(fs::read(dir.join(blob_name(id, field))).ok()),
+        1 => {
+            let h = r.u64().ok_or(())?;
+            let len = r.u32().ok_or(())?;
+            Ok(read_blob_file(dir, len, h))
+        }
         _ => Err(()),
     }
 }
 
-fn read_text_blob(r: &mut Reader, dir: &Path, id: u64, field: &str) -> Result<Option<String>, ()> {
-    Ok(read_blob(r, dir, id, field)?.and_then(|b| String::from_utf8(b).ok()))
+/// The blob file's bytes, only if it is within budget and is what the index
+/// says (size and hash).
+fn read_blob_file(dir: &Path, len: u32, h: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if len > MAX_BLOB {
+        return None;
+    }
+    let file = fs::File::open(dir.join(blob_name(len, h))).ok()?;
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(len as u64 + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() == len as usize && hash(&bytes) == h).then_some(bytes)
 }
 
-fn read_opt_text(r: &mut Reader, dir: &Path, id: u64, field: &str) -> Result<Option<Option<String>>, ()> {
+fn read_text_blob(r: &mut Reader, dir: &Path) -> Result<Option<String>, ()> {
+    Ok(read_blob(r, dir)?.and_then(|b| String::from_utf8(b).ok()))
+}
+
+fn read_opt_text(r: &mut Reader, dir: &Path) -> Result<Option<Option<String>>, ()> {
     match r.u8().ok_or(())? {
         0 => Ok(Some(None)),
-        1 => Ok(read_text_blob(r, dir, id, field)?.map(Some)),
+        1 => Ok(read_text_blob(r, dir)?.map(Some)),
         _ => Err(()),
     }
 }
@@ -231,9 +269,9 @@ fn parse_record(r: &mut Reader, dir: &Path) -> Parsed {
     let mut b = Reader { data: body_bytes, pos: 0 };
     let body = match kind {
         1 => {
-            let text = read_text_blob(&mut b, dir, id, "text")?;
-            let html = read_opt_text(&mut b, dir, id, "html")?;
-            let rtf = read_opt_text(&mut b, dir, id, "rtf")?;
+            let text = read_text_blob(&mut b, dir)?;
+            let html = read_opt_text(&mut b, dir)?;
+            let rtf = read_opt_text(&mut b, dir)?;
             match (text, html, rtf) {
                 (Some(text), Some(html), Some(rtf)) => Body::Text { text, html, rtf },
                 _ => return Ok(None),
@@ -242,7 +280,7 @@ fn parse_record(r: &mut Reader, dir: &Path) -> Parsed {
         2 => {
             let width = b.u32().ok_or(())?;
             let height = b.u32().ok_or(())?;
-            match read_blob(&mut b, dir, id, "png")? {
+            match read_blob(&mut b, dir)? {
                 Some(png) => Body::Image { width, height, png },
                 None => return Ok(None),
             }
@@ -267,9 +305,14 @@ fn decode(data: &[u8], dir: &Path) -> Vec<Record> {
         return Vec::new();
     }
     let Some(count) = r.u32() else { return Vec::new() };
-    let mut out = Vec::new();
+    if count > MAX_RECORDS {
+        return Vec::new();
+    }
+    let mut out: Vec<Record> = Vec::new();
+    let mut ids = HashSet::new();
     for _ in 0..count {
         match parse_record(&mut r, dir) {
+            Ok(Some(rec)) if !ids.insert(rec.id) => return Vec::new(),
             Ok(Some(rec)) => out.push(rec),
             Ok(None) => {}
             // Truncated or garbled: the whole store is distrusted.
@@ -281,21 +324,31 @@ fn decode(data: &[u8], dir: &Path) -> Vec<Record> {
 
 // ---- files --------------------------------------------------------------
 
+/// Temp file, flushed to disk, then renamed over `name`.
 fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
     let tmp = dir.join(format!("{name}.tmp"));
-    fs::write(&tmp, bytes)?;
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
     fs::rename(&tmp, dir.join(name))
 }
 
-/// Writes the store: blobs first, then the index, then removes every file of
-/// ours the index no longer refers to (removed Clips, stray `.tmp` files).
+/// Writes the store in the commit order of the module comment: blobs flushed,
+/// index flushed and renamed, then reclaim every file of ours the new index no
+/// longer names (removed Clips, stray `.tmp` files).
 pub fn save_to(dir: &Path, records: &[Record]) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let (index, blobs) = encode(records);
     let mut keep: HashSet<String> = HashSet::new();
     keep.insert(INDEX.to_string());
     for (name, bytes) in &blobs {
-        write_atomic(dir, name, bytes)?;
+        // Same name, same bytes: a blob already on disk is not written again.
+        let present = fs::metadata(dir.join(name)).is_ok_and(|m| m.len() == bytes.len() as u64);
+        if !present {
+            write_atomic(dir, name, bytes)?;
+        }
         keep.insert(name.clone());
     }
     write_atomic(dir, INDEX, &index)?;
@@ -311,7 +364,11 @@ pub fn save_to(dir: &Path, records: &[Record]) -> io::Result<()> {
 
 /// Reads the store. Missing, partial or garbled is an empty History.
 pub fn load_from(dir: &Path) -> Vec<Record> {
-    match fs::read(dir.join(INDEX)) {
+    let path = dir.join(INDEX);
+    if fs::metadata(&path).map_or(true, |m| m.len() > MAX_INDEX_BYTES) {
+        return Vec::new();
+    }
+    match fs::read(path) {
         Ok(data) => decode(&data, dir),
         Err(_) => Vec::new(),
     }
@@ -322,6 +379,8 @@ pub fn load_from(dir: &Path) -> Vec<Record> {
 enum Job {
     Save(Vec<Record>),
     Load(Box<dyn FnOnce(Vec<Record>) + Send>),
+    /// Answered when every job before it is done.
+    Flush(Sender<()>),
 }
 
 /// The worker thread that owns all disk access for one folder. Jobs run in the
@@ -363,6 +422,9 @@ impl Store {
                         }
                     }
                     Job::Load(done) => done(load_from(&dir)),
+                    Job::Flush(ack) => {
+                        let _ = ack.send(());
+                    }
                 }
             }
         });
@@ -373,6 +435,13 @@ impl Store {
         if let Some(tx) = &self.tx {
             let _ = tx.send(job);
         }
+    }
+
+    /// Block until every queued job (a pending load included) has run.
+    pub fn flush(&self) {
+        let (ack, done) = channel();
+        self.send(Job::Flush(ack));
+        let _ = done.recv();
     }
 
     /// Save these records (the caller has already capped them).
@@ -507,7 +576,7 @@ mod tests {
         let dir = temp("version");
         save_to(&dir, &mixed()).unwrap();
         let mut data = fs::read(dir.join(INDEX)).unwrap();
-        data[4] = 2;
+        data[4] = VERSION as u8 + 1;
         fs::write(dir.join(INDEX), &data).unwrap();
         assert!(load_from(&dir).is_empty());
         let _ = fs::remove_dir_all(&dir);
@@ -518,7 +587,7 @@ mod tests {
         let dir = temp("blob");
         let records = mixed();
         save_to(&dir, &records).unwrap();
-        fs::remove_file(dir.join(blob_name(3, "png"))).unwrap();
+        fs::remove_file(dir.join(blob_name(4, hash(&[0, 1, 2, 255])))).unwrap();
         let loaded = load_from(&dir);
         assert_eq!(loaded.len(), records.len() - 1);
         assert!(loaded.iter().all(|r| r.id != 3));
@@ -558,6 +627,87 @@ mod tests {
         assert_eq!(ids, sorted);
         assert_eq!(cap(Vec::<Record>::new(), |r| r.pinned, 100), vec![]);
         assert_eq!(cap(list.clone(), |r| r.pinned, 1000), list);
+    }
+
+    fn image(id: u64, byte: u8) -> Record {
+        Record {
+            id,
+            last_copied_ms: 1,
+            pinned: false,
+            body: Body::Image { width: 1, height: 1, png: vec![byte; 8] },
+        }
+    }
+
+    #[test]
+    fn a_save_never_rewrites_a_blob_the_committed_index_names() {
+        let dir = temp("immutable");
+        // Clip 0 holds A; a later save gives id 0 different content B.
+        save_to(&dir, &[image(0, 1)]).unwrap();
+        let committed = fs::read(dir.join(INDEX)).unwrap();
+        let a_name = blob_name(8, hash(&[1; 8]));
+        let b_name = blob_name(8, hash(&[2; 8]));
+        assert_ne!(a_name, b_name);
+        // The crash window: B's blob is on disk, the index is still the old one.
+        let (_, blobs) = encode(&[image(0, 2)]);
+        fs::write(dir.join(&blobs[0].0), &blobs[0].1).unwrap();
+        assert_eq!(fs::read(dir.join(INDEX)).unwrap(), committed);
+        assert_eq!(load_from(&dir), vec![image(0, 1)]);
+        save_to(&dir, &[image(0, 2)]).unwrap();
+        assert_eq!(load_from(&dir), vec![image(0, 2)]);
+        assert!(!dir.join(a_name).exists() && dir.join(b_name).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_changed_blob_file_drops_its_clip() {
+        let dir = temp("tamper");
+        save_to(&dir, &mixed()).unwrap();
+        fs::write(dir.join(blob_name(4, hash(&[0, 1, 2, 255]))), [9, 9, 9, 9]).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.len(), mixed().len() - 1);
+        assert!(loaded.iter().all(|r| r.id != 3));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn over_budget_stores_load_empty() {
+        let dir = temp("budget");
+        // Too many records.
+        let many: Vec<Record> = (0..=MAX_RECORDS as u64).map(|i| text(i, "x")).collect();
+        save_to(&dir, &many).unwrap();
+        assert!(load_from(&dir).is_empty());
+        // Duplicate ids.
+        save_to(&dir, &[text(1, "a"), text(1, "b")]).unwrap();
+        assert!(load_from(&dir).is_empty());
+        // A blob claimed over the size budget drops its Clip, not the store
+        // (the length is the last 4 bytes of the image's blob reference).
+        save_to(&dir, &[text(1, "ok"), image(2, 7)]).unwrap();
+        let mut data = fs::read(dir.join(INDEX)).unwrap();
+        let end = data.len();
+        data[end - 4..].copy_from_slice(&(1u32 << 30).to_le_bytes());
+        fs::write(dir.join(INDEX), &data).unwrap();
+        let loaded = load_from(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, 1);
+        // An oversized index file is not read at all.
+        let f = fs::File::create(dir.join(INDEX)).unwrap();
+        f.set_len(MAX_INDEX_BYTES + 1).unwrap();
+        drop(f);
+        assert!(load_from(&dir).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flush_waits_for_a_pending_load_and_save() {
+        let dir = temp("flush");
+        let store = Store::spawn(dir.clone());
+        let (tx, rx) = mpsc::channel();
+        store.save(mixed());
+        store.load(move |r| tx.send(r).unwrap());
+        store.flush();
+        assert_eq!(rx.try_recv().unwrap(), mixed());
+        drop(store);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
