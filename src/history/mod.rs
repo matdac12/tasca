@@ -19,6 +19,8 @@
 
 mod clip;
 mod draw;
+mod formats;
+mod image;
 mod layout;
 mod menu;
 mod paste;
