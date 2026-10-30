@@ -149,16 +149,36 @@ fn toggle() {
     }
 }
 
+/// The app to paste back into: the foreground window, unless there is none or
+/// it is one of ours (the History window, or the resident when the tray menu
+/// opened the History), which cannot take a paste.
+fn paste_target(foreground: isize, history: isize, resident: isize) -> Option<Target> {
+    (foreground != 0 && foreground != history && foreground != resident).then_some(Target(foreground))
+}
+
+/// Start or stop recording copies (the Settings switch for the History).
+#[allow(dead_code)] // resident.rs switches to it after the merge
+pub fn set_listening(resident: HWND, on: bool) {
+    let Some(window) = with(|s| s.window) else { return };
+    if on {
+        record::start(resident, window);
+    } else {
+        record::stop(resident);
+    }
+}
+
 /// Open at the pointer, remembering the app to paste back into.
 fn open() {
-    let Some((window, rows, already)) = with(|s| (s.window, s.machine.clips().len(), s.machine.is_open())) else {
+    let Some((window, resident, rows, already)) =
+        with(|s| (s.window, s.resident, s.machine.clips().len(), s.machine.is_open()))
+    else {
         return;
     };
     if already {
         return; // keep the paste target and the selection
     }
     let foreground = unsafe { GetForegroundWindow() };
-    let target = (!foreground.is_invalid() && foreground != window).then_some(Target(foreground.0 as isize));
+    let target = paste_target(foreground.0 as isize, window.0 as isize, resident.0 as isize);
     let (pointer, work, dpi) = window::pointer_monitor();
     let scale = dpi as f32 / 96.0;
     let gap = window::pointer_gap(scale);
@@ -282,5 +302,19 @@ pub(crate) fn on_wheel(delta: i32, x: i32, y: i32) {
     });
     if changed == Some(true) {
         redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_paste_target_is_the_foreground_app_never_one_of_ours() {
+        assert_eq!(paste_target(0x500, 0x100, 0x200), Some(Target(0x500)));
+        assert_eq!(paste_target(0, 0x100, 0x200), None);
+        assert_eq!(paste_target(0x100, 0x100, 0x200), None);
+        // The tray menu leaves the resident in the foreground.
+        assert_eq!(paste_target(0x200, 0x100, 0x200), None);
     }
 }
