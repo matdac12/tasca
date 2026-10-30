@@ -5,14 +5,15 @@
 //! it.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 
 use windows::core::{Result, HSTRING};
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1CreateFactory, D2D1_BITMAP_PROPERTIES, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT,
     D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE, D2D1_RENDER_TARGET_USAGE_NONE,
 };
@@ -24,8 +25,9 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
 use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
+use super::preview::{Preview, H_DIP, W_DIP};
 use super::layout::{Layout, LABEL_H, PAD, RADIUS, ROW_H, ROW_RADIUS, SIDE};
 use crate::shelf::render::{font_family, rr, text_format, wide, Surface};
 
@@ -48,6 +50,9 @@ const PIN_W: f32 = 10.0;
 const PIN_GAP: f32 = 4.0;
 /// Rows that carry an Alt+number.
 const NUMBERED: usize = 9;
+/// An image row's preview: corner radius, and the gap to the text.
+const PREVIEW_RADIUS: f32 = 4.0;
+const PREVIEW_GAP: f32 = 10.0;
 
 /// One row as the panel shows it.
 pub struct RowView {
@@ -55,6 +60,8 @@ pub struct RowView {
     pub sub: String,
     /// Shows the pin glyph before `sub`.
     pub pinned: bool,
+    /// An image row: `Some(None)` while the preview is being decoded.
+    pub preview: Option<Option<Arc<Preview>>>,
 }
 
 /// What one frame shows.
@@ -296,6 +303,37 @@ unsafe fn draw_pin(rt: &ID2D1DCRenderTarget, x: f32, cy: f32, b: &ID2D1SolidColo
     }
 }
 
+/// The image preview in `r` (44 x 28 DIP): the picture cut to fill with a
+/// 4 DIP corner and a hairline; a faint plate while it is still being decoded.
+unsafe fn draw_preview(rt: &ID2D1DCRenderTarget, p: Option<&Preview>, r: D2D_RECT_F, hair: f32) -> Result<()> {
+    unsafe {
+        let white = |a: f32| rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a }, None);
+        if let Some(p) = p {
+            let (mut dx, mut dy) = (0.0, 0.0);
+            rt.GetDpi(&mut dx, &mut dy);
+            // The bitmap carries the target's DPI, so its DIP size is its pixels over the scale.
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: dx,
+                dpiY: dy,
+            };
+            let size = D2D_SIZE_U { width: p.w, height: p.h };
+            let brush = rt
+                .CreateBitmap(size, Some(p.bgra.as_ptr() as *const _), p.w * 4, &props)
+                .and_then(|bmp| rt.CreateBitmapBrush(&bmp, None, None));
+            if let Ok(brush) = brush {
+                brush.SetTransform(&Matrix3x2::translation(r.left, r.top));
+                rt.FillRoundedRectangle(&rr(r.left, r.top, r.right, r.bottom, PREVIEW_RADIUS), &brush);
+            }
+        } else {
+            rt.FillRoundedRectangle(&rr(r.left, r.top, r.right, r.bottom, PREVIEW_RADIUS), &white(HOVER_A)?);
+        }
+        let hh = hair / 2.0;
+        rt.DrawRoundedRectangle(&rr(r.left + hh, r.top + hh, r.right - hh, r.bottom - hh, PREVIEW_RADIUS), &white(HAIRLINE_A)?, hair, None);
+        Ok(())
+    }
+}
+
 /// Labels and rows (or the empty state), in list-viewport coordinates.
 unsafe fn draw_list(
     rt: &ID2D1DCRenderTarget,
@@ -311,6 +349,7 @@ unsafe fn draw_list(
         let (top, bottom) = (l.list_top(), l.list_top() + l.list_h());
         let (t1, t2, t3) = (white(T1)?, white(T2)?, white(T3)?);
         let text = |s: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| put(rt, s, f, r, b);
+        let hair = l.hair();
 
         if v.layout.rows == 0 {
             let msg = if v.query.is_empty() { "Nothing copied yet" } else { "No Clip matches" };
@@ -347,14 +386,21 @@ unsafe fn draw_list(
                 text(&(i + 1).to_string(), &fonts.num, num, if selected { &t2 } else { &t3 });
             }
             let mx = x0 + SIDE + NUM_W + SIDE;
-            text(&row.title, &fonts.name, rect(mx, y + 7.0, x1 - SIDE, y + 23.0), &t1);
+            // An image row keeps its right edge for the preview.
+            let mut right = x1 - SIDE;
+            if let Some(preview) = &row.preview {
+                let r = rect(right - W_DIP, y + (ROW_H - H_DIP) / 2.0, right, y + (ROW_H + H_DIP) / 2.0);
+                draw_preview(rt, preview.as_deref(), r, hair)?;
+                right = r.left - PREVIEW_GAP;
+            }
+            text(&row.title, &fonts.name, rect(mx, y + 7.0, right, y + 23.0), &t1);
             let sub_x = if row.pinned {
                 draw_pin(rt, mx, y + 30.0, &t2);
                 mx + PIN_W + PIN_GAP
             } else {
                 mx
             };
-            text(&row.sub, &fonts.sub, rect(sub_x, y + 23.0, x1 - SIDE, y + 37.0), &t2);
+            text(&row.sub, &fonts.sub, rect(sub_x, y + 23.0, right, y + 37.0), &t2);
         }
         Ok(())
     }

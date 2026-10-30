@@ -9,9 +9,6 @@
 //! clipboard's bitmaps: a 32-bit BI_RGB bitmap often has an unused alpha byte
 //! of zero, so a bitmap whose alpha is all zero counts as opaque.
 
-// Not wired into the recorder and paste-back yet.
-#![allow(dead_code)]
-
 use windows::core::{Result, GUID};
 use windows::Win32::Foundation::E_FAIL;
 use windows::Win32::Graphics::Imaging::{

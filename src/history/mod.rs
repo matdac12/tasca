@@ -24,6 +24,7 @@ mod image;
 mod layout;
 mod menu;
 mod paste;
+mod preview;
 mod record;
 mod search;
 mod state;
@@ -41,11 +42,12 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, PostMessageW,
 
 use crate::hotkey::Slot;
 use crate::log::log;
-use crate::proto::{WM_HISTORY_LOADED, WM_HISTORY_READ, WM_SHOW_HISTORY};
+use crate::proto::{WM_HISTORY_LOADED, WM_HISTORY_PASTE_READY, WM_HISTORY_PREVIEW, WM_HISTORY_READ, WM_SHOW_HISTORY};
 use clip::Clip;
+use clip::Content;
 use layout::{Hit, Layout};
 use state::{Effect, Event, Machine, Target};
-use store::{Record, Store};
+use store::Store;
 
 /// Not exported by the `windows` features we enable.
 const WM_CLIPBOARDUPDATE: u32 = 0x031D;
@@ -89,7 +91,7 @@ fn now_ms() -> u64 {
 
 /// The saved History, handed from the store's worker to the UI thread (the
 /// message that follows carries no data).
-static LOADED: Mutex<Option<Vec<Record>>> = Mutex::new(None);
+static LOADED: Mutex<Option<Vec<Clip>>> = Mutex::new(None);
 
 thread_local! {
     static SHELL: RefCell<Option<Shell>> = const { RefCell::new(None) };
@@ -139,7 +141,9 @@ fn start_store(resident: HWND) -> Option<Store> {
     let store = Store::spawn(store::default_dir()?);
     let resident = resident.0 as isize;
     store.load(move |records| {
-        *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(records);
+        // Still on the store's worker: images are decoded here to hash their pixels.
+        let clips: Vec<Clip> = records.into_iter().filter_map(Clip::from_record).collect();
+        *LOADED.lock().unwrap_or_else(|e| e.into_inner()) = Some(clips);
         let hwnd = HWND(resident as *mut _);
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_HISTORY_LOADED, WPARAM(0), LPARAM(0));
@@ -168,6 +172,8 @@ pub fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> Option<LRESULT> {
         WM_CLIPBOARDUPDATE => record::on_update(hwnd),
         WM_HISTORY_READ => record::on_read(hwnd),
         WM_HISTORY_LOADED => on_loaded(),
+        WM_HISTORY_PASTE_READY => paste::on_prepared(hwnd),
+        WM_HISTORY_PREVIEW => redraw_if_open(),
         WM_TIMER if wp.0 == paste::T_WRITE => paste::on_write_retry(hwnd),
         WM_TIMER if wp.0 == paste::T_KEYS => paste::on_keys(hwnd),
         WM_HOTKEY if Slot::from_id(wp.0 as i32) == Some(Slot::History) => toggle(),
@@ -191,8 +197,7 @@ fn finish_load() {
 
 /// The store's worker finished reading: merge the saved Clips in.
 fn on_loaded() {
-    let Some(records) = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-    let clips: Vec<Clip> = records.into_iter().filter_map(Clip::from_record).collect();
+    let Some(clips) = LOADED.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
     log(format!("history: loaded {} saved clips", clips.len()));
     dispatch(Event::Loaded(clips));
 }
@@ -309,6 +314,13 @@ fn apply(effect: Effect) {
     }
 }
 
+/// A preview landed: show it if the panel is up.
+fn redraw_if_open() {
+    if with(|s| s.machine.is_open()) == Some(true) {
+        redraw();
+    }
+}
+
 /// Render the panel for the machine's state and show it (or update it).
 fn redraw() {
     let now = now_ms();
@@ -345,12 +357,35 @@ fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
     let clips = s.machine.shown();
     let visible = layout.visible_rows(s.scroll);
     let first = visible.start;
+    let dpi_key = preview::Key::new(0, s.scale).dpi;
+    // Previews of images that left the History, or of another DPI, are freed.
+    let live: std::collections::HashSet<u64> = s
+        .machine
+        .clips()
+        .iter()
+        .filter_map(|c| match &c.content {
+            Content::Image { hash, .. } => Some(*hash),
+            _ => None,
+        })
+        .collect();
+    preview::retain(dpi_key, &live);
     let rows = clips[visible]
         .iter()
         .map(|c| draw::RowView {
-            title: text::one_line(&c.text),
-            sub: if c.pinned { text::pinned_line(&c.text) } else { text::type_line(&c.text, now, c.last_copied_ms) },
+            title: text::clip_title(c),
+            sub: if c.pinned { text::pinned_line(c) } else { text::type_line(c, now, c.last_copied_ms) },
             pinned: c.pinned,
+            preview: match &c.content {
+                Content::Image { hash, png, .. } => {
+                    let key = preview::Key::new(*hash, s.scale);
+                    let ready = preview::get(key);
+                    if ready.is_none() {
+                        preview::request(s.resident, s.scale, *hash, png);
+                    }
+                    Some(ready)
+                }
+                _ => None,
+            },
         })
         .collect();
     draw::View {

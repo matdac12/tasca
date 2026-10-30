@@ -2,9 +2,6 @@
 //! kind choice, the size cap, the CF_HTML header, the CF_HDROP path list,
 //! duplicate keys and the row words for images and files.
 
-// Not wired into the recorder and paste-back yet.
-#![allow(dead_code)]
-
 /// What a copy offers, as flags the reader fills from `IsClipboardFormatAvailable`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Offered {
@@ -109,12 +106,14 @@ pub fn parse_cf_html(data: &[u8]) -> Option<CfHtml> {
 
 /// The fragment's text (what was selected), if the block parses and the
 /// fragment is UTF-8.
+#[cfg(test)]
 pub fn cf_html_fragment(data: &[u8]) -> Option<&str> {
     let h = parse_cf_html(data)?;
     std::str::from_utf8(&data[h.start_fragment..h.end_fragment]).ok()
 }
 
 /// Wraps an HTML fragment in a CF_HTML block (version 0.9, 10-digit offsets).
+#[cfg(test)]
 pub fn build_cf_html(fragment: &str, source_url: Option<&str>) -> Vec<u8> {
     const PRE: &str = "<html><body>\r\n<!--StartFragment-->";
     const POST: &str = "<!--EndFragment-->\r\n</body></html>";

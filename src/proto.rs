@@ -36,6 +36,12 @@ pub const WM_HISTORY_READ: u32 = WM_APP + 22;
 /// The History store finished loading on its worker; the Clips are in a queue, not in the message.
 pub const WM_HISTORY_LOADED: u32 = WM_APP + 23;
 
+/// The DIB for pasting an image back was made on its worker; the bytes are in a queue, not in the message.
+pub const WM_HISTORY_PASTE_READY: u32 = WM_APP + 24;
+
+/// A History row's image preview was decoded on its worker; it is in a cache, not in the message.
+pub const WM_HISTORY_PREVIEW: u32 = WM_APP + 25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +61,8 @@ mod tests {
             WM_SHOW_HISTORY,
             WM_HISTORY_READ,
             WM_HISTORY_LOADED,
+            WM_HISTORY_PASTE_READY,
+            WM_HISTORY_PREVIEW,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");
