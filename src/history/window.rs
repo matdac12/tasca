@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::time::Instant;
 
 use windows::core::{w, Result};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, ScreenToClient, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -67,6 +67,13 @@ pub fn frame(pointer: (i32, i32), gap: i32, layout: &Layout, work: Work) -> ((i3
     ((panel.0 - ox, panel.1 - oy), layout.size_px())
 }
 
+/// The pointer position in screen pixels.
+pub fn cursor() -> (i32, i32) {
+    let mut p = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut p) };
+    (p.x, p.y)
+}
+
 /// The monitor under the pointer: pointer, work area and DPI.
 pub fn pointer_monitor() -> ((i32, i32), Work, u32) {
     unsafe {
@@ -98,7 +105,8 @@ pub fn create() -> Result<HWND> {
             lpszClassName: CLASS,
             ..Default::default()
         };
-        if RegisterClassExW(&wc) == 0 {
+        // A second call finds the class already there, which is fine.
+        if RegisterClassExW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(windows::core::Error::from_thread());
         }
         CreateWindowExW(
@@ -143,6 +151,11 @@ pub fn show(hwnd: HWND, view: &View, at: (i32, i32)) -> bool {
         ORIGIN.set(at);
         if let Err(e) = draw::render(hwnd, view, POINT { x: at.0, y: at.1 }, alpha_now()) {
             log(format!("history: render failed: {e}"));
+            if !was_visible {
+                // Nothing drawn for this opening: never show or focus a stale frame.
+                FADE.set(None);
+                return false;
+            }
         }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         if !was_visible {

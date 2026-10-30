@@ -55,7 +55,9 @@ pub struct RowView {
 /// What one frame shows.
 pub struct View {
     pub layout: Layout,
+    /// The rows in the viewport only, starting at row `first`.
     pub rows: Vec<RowView>,
+    pub first: usize,
     pub selected: Option<usize>,
     pub hover: Option<usize>,
     pub scroll: f32,
@@ -284,7 +286,7 @@ unsafe fn draw_list(
         let (t1, t2, t3) = (white(T1)?, white(T2)?, white(T3)?);
         let text = |s: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| put(rt, s, f, r, b);
 
-        if v.rows.is_empty() {
+        if v.layout.rows == 0 {
             let msg = if v.query.is_empty() { "Nothing copied yet" } else { "No Clip matches" };
             text(msg, &fonts.empty, rect(x0, top, x1, bottom), &t3);
             return Ok(());
@@ -297,7 +299,8 @@ unsafe fn draw_list(
             let name = if pinned { "Pinned" } else { "Recent" };
             text(name, &fonts.label, rect(x0 + SIDE, y + 7.0, x1 - SIDE, y + 21.0), &t3);
         }
-        for (i, row) in v.rows.iter().enumerate() {
+        for (k, row) in v.rows.iter().enumerate() {
+            let i = v.first + k;
             let y = top + l.row_top(i) - scroll;
             if y + ROW_H < top || y > bottom {
                 continue;

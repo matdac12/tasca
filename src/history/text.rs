@@ -7,25 +7,43 @@ const DAY_MS: u64 = 24 * HOUR_MS;
 
 /// A Clip's text as one display line: whitespace runs become single spaces,
 /// and it stops after `LINE_CHARS` characters (the row ellipsizes anyway).
+/// Scans no further than the characters it keeps, so a huge Clip costs the
+/// same as a short one.
 pub fn one_line(text: &str) -> String {
     let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() {
-            line.push(' ');
+    let mut kept = 0;
+    let mut gap = false;
+    for c in text.chars() {
+        if c.is_whitespace() {
+            gap = !line.is_empty();
+            continue;
         }
-        line.push_str(word);
-        if line.chars().count() >= LINE_CHARS {
+        if gap {
+            line.push(' ');
+            kept += 1;
+            gap = false;
+        }
+        if kept >= LINE_CHARS {
             break;
         }
+        line.push(c);
+        kept += 1;
     }
-    line.chars().take(LINE_CHARS).collect()
+    line.truncate(line.trim_end().len());
+    line
 }
 
 const LINE_CHARS: usize = 300;
+/// Longer than this (in bytes) is never "a lone URL"; keeps `is_link` from
+/// scanning a huge Clip.
+const LINK_MAX: usize = 2048;
 
 /// Whether the whole text is one web address.
 pub fn is_link(text: &str) -> bool {
     let t = text.trim();
+    if t.len() > LINK_MAX {
+        return false;
+    }
     let rest = ["https://", "http://", "www."].iter().find_map(|p| t.strip_prefix(p));
     rest.is_some_and(|r| !r.is_empty() && !t.chars().any(char::is_whitespace))
 }
@@ -73,6 +91,20 @@ mod tests {
         let line = one_line(&text);
         assert!(line.starts_with("word word"));
         assert!(line.chars().count() <= LINE_CHARS);
+    }
+
+    #[test]
+    fn a_huge_clip_without_spaces_is_cut_without_being_read_in_full() {
+        let huge = "x".repeat(10 * 1024 * 1024);
+        let line = one_line(&huge);
+        assert_eq!(line.chars().count(), LINE_CHARS);
+        assert_eq!(kind_label(&huge), "Text");
+        let spaced = format!("   a   b{}", " c".repeat(LINE_CHARS));
+        let line = one_line(&spaced);
+        assert!(line.starts_with("a b c c"));
+        assert!(line.chars().count() <= LINE_CHARS);
+        assert!(!line.ends_with(' '));
+        assert_eq!(one_line("  \n "), "");
     }
 
     #[test]

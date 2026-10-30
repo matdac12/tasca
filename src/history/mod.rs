@@ -60,6 +60,8 @@ struct Shell {
     scroll: f32,
     /// The selection the scroll last followed.
     followed: usize,
+    /// Recording copies (the clipboard listener is registered).
+    listening: bool,
 }
 
 impl Shell {
@@ -105,6 +107,7 @@ pub fn create(resident: HWND) -> Result<()> {
             hover: None,
             scroll: 0.0,
             followed: 0,
+            listening: true,
         })
     });
     if let Err(e) = draw::init() {
@@ -116,6 +119,7 @@ pub fn create(resident: HWND) -> Result<()> {
 
 pub fn destroy(resident: HWND) {
     record::stop(resident);
+    with(|s| s.listening = false);
     draw::destroy();
     if let Some(shell) = SHELL.with(|c| c.borrow_mut().take()) {
         unsafe {
@@ -159,12 +163,21 @@ fn paste_target(foreground: isize, history: isize, resident: isize) -> Option<Ta
 /// Start or stop recording copies (the Settings switch for the History).
 #[allow(dead_code)] // resident.rs switches to it after the merge
 pub fn set_listening(resident: HWND, on: bool) {
-    let Some(window) = with(|s| s.window) else { return };
+    let Some((window, change)) = with(|s| (s.window, switch(&mut s.listening, on))) else { return };
+    if !change {
+        return;
+    }
     if on {
         record::start(resident, window);
     } else {
         record::stop(resident);
     }
+}
+
+/// Move a switch to `on`; `true` when that changed it (so the listener is
+/// added or removed once, never twice).
+fn switch(current: &mut bool, on: bool) -> bool {
+    std::mem::replace(current, on) != on
 }
 
 /// Open at the pointer, remembering the app to paste back into.
@@ -198,7 +211,15 @@ fn open() {
 /// Step the machine, then carry out its effects outside the borrow.
 fn dispatch(event: Event) {
     let now = now_ms();
-    let Some(effects) = with(|s| s.machine.step(event, now)) else { return };
+    let Some(effects) = with(|s| {
+        // A read that was already in flight when recording was switched off.
+        if !s.listening && matches!(event, Event::Copied(_)) {
+            return Vec::new();
+        }
+        s.machine.step(event, now)
+    }) else {
+        return;
+    };
     for effect in effects {
         apply(effect);
     }
@@ -228,10 +249,9 @@ fn redraw() {
             s.scroll = layout.scroll_to_show(s.scroll, selected);
         }
         s.scroll = layout.clamp_scroll(s.scroll);
-        if s.hover.is_some_and(|i| i >= layout.rows) {
-            s.hover = None;
-        }
         let (origin, _) = window::frame(s.pointer, s.gap, &layout, s.work);
+        // Rows may have moved under a pointer that did not: look again.
+        s.hover = hover_at(&layout, window::cursor(), origin, s.scroll);
         (s.window, view(s, layout, now), origin)
     }) else {
         return;
@@ -241,16 +261,27 @@ fn redraw() {
     }
 }
 
-/// What the window shows now.
+/// The row under a screen point, for a window at `origin`.
+fn hover_at(layout: &Layout, pointer: (i32, i32), origin: (i32, i32), scroll: f32) -> Option<usize> {
+    match layout.hit(pointer.0 - origin.0, pointer.1 - origin.1, scroll) {
+        Hit::Row(i) => Some(i),
+        _ => None,
+    }
+}
+
+/// What the window shows now: only the rows in the viewport are built.
 fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
     let clips = s.machine.clips();
-    let rows = clips
+    let visible = layout.visible_rows(s.scroll);
+    let first = visible.start;
+    let rows = clips[visible]
         .iter()
         .map(|c| draw::RowView { title: text::one_line(&c.text), sub: text::type_line(&c.text, now, c.last_copied_ms) })
         .collect();
     draw::View {
         layout,
         rows,
+        first,
         selected: (!clips.is_empty()).then(|| s.machine.selected()),
         hover: s.hover,
         scroll: s.scroll,
@@ -316,5 +347,28 @@ mod tests {
         assert_eq!(paste_target(0x100, 0x100, 0x200), None);
         // The tray menu leaves the resident in the foreground.
         assert_eq!(paste_target(0x200, 0x100, 0x200), None);
+    }
+
+    #[test]
+    fn a_switch_reports_only_a_real_change() {
+        let mut on = true;
+        assert!(!switch(&mut on, true));
+        assert!(switch(&mut on, false));
+        assert!(!switch(&mut on, false));
+        assert!(switch(&mut on, true));
+        assert!(on);
+    }
+
+    #[test]
+    fn hover_follows_the_row_under_a_still_pointer() {
+        let l = Layout::new(1.0, 20, 0, false);
+        let origin = (1000, 200);
+        // Pointer over the list's first row (after the 21 DIP label), then the same
+        // pointer after the list scrolled by two rows.
+        let pointer = (origin.0 + 200, origin.1 + l.list_top() as i32 + 30);
+        assert_eq!(hover_at(&l, pointer, origin, 0.0), Some(0));
+        assert_eq!(hover_at(&l, pointer, origin, 2.0 * 44.0), Some(2));
+        // Outside the window: none.
+        assert_eq!(hover_at(&l, (5, 5), origin, 0.0), None);
     }
 }

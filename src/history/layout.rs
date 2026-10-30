@@ -171,6 +171,15 @@ impl Layout {
         self.clamp_scroll(shown)
     }
 
+    /// The rows that show (even partly) at `scroll`: the only ones worth building.
+    pub fn visible_rows(&self, scroll: f32) -> std::ops::Range<usize> {
+        let scroll = self.clamp_scroll(scroll);
+        let bottom = scroll + self.list_h();
+        let first = (0..self.rows).find(|&i| self.row_top(i) + ROW_H > scroll).unwrap_or(self.rows);
+        let end = (first..self.rows).find(|&i| self.row_top(i) >= bottom).unwrap_or(self.rows);
+        first..end
+    }
+
     /// Window size in physical pixels, shadow margins included.
     pub fn size_px(&self) -> (i32, i32) {
         let w = (MARGIN_L + PANEL_W + MARGIN_R) * self.scale;
@@ -327,6 +336,21 @@ mod tests {
         // The last row at the bottom of a fully scrolled list.
         let bottom = (l.list_top() + l.list_h() - 5.0) as i32;
         assert_eq!(l.hit(200, bottom, l.max_scroll()), Hit::Row(19));
+    }
+
+    #[test]
+    fn only_the_rows_in_the_viewport_are_visible() {
+        let l = layout(100);
+        // Top: label + rows 0..=8 fill 417, row 9 starts at 417 < 438.
+        assert_eq!(l.visible_rows(0.0), 0..10);
+        // Scrolled to row 50's top: it is first; the viewport reaches row 59.
+        assert_eq!(l.visible_rows(l.row_top(50)), 50..60);
+        // A partly hidden first row still counts.
+        assert_eq!(l.visible_rows(l.row_top(50) + 10.0).start, 50);
+        // Past the end clamps; short and empty lists.
+        assert_eq!(l.visible_rows(1e9).end, 100);
+        assert_eq!(layout(3).visible_rows(0.0), 0..3);
+        assert_eq!(layout(0).visible_rows(0.0), 0..0);
     }
 
     #[test]
