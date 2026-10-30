@@ -321,16 +321,14 @@ impl Machine {
                 self.paste_row(n as usize - 1, false, now_ms)
             }
             Key::Digit(_) => Vec::new(),
-            Key::Pin if mods.ctrl => match self.shown().get(self.selected).map(|c| c.id) {
-                Some(id) => self.toggle_pin(id),
-                None => Vec::new(),
-            },
-            Key::Delete if mods.ctrl => match self.shown().get(self.selected).map(|c| c.id) {
-                Some(id) => self.delete(id),
-                None => Vec::new(),
-            },
+            Key::Pin if mods.ctrl => self.selected_id().map_or_else(Vec::new, |id| self.toggle_pin(id)),
+            Key::Delete if mods.ctrl => self.selected_id().map_or_else(Vec::new, |id| self.delete(id)),
             Key::Pin | Key::Delete => Vec::new(),
         }
+    }
+
+    fn selected_id(&self) -> Option<ClipId> {
+        self.shown().get(self.selected).map(|c| c.id)
     }
 
     fn clip_action(&mut self, id: ClipId, action: Action, now_ms: u64) -> Vec<Effect> {
@@ -364,7 +362,7 @@ impl Machine {
     /// Pin a Clip, or unpin it (then it falls back among the Recent ones by
     /// its last-copied time, and the cap applies to it again).
     fn toggle_pin(&mut self, id: ClipId) -> Vec<Effect> {
-        let selected = self.shown().get(self.selected).map(|c| c.id);
+        let selected = self.selected_id();
         let Some(clip) = self.clips.iter_mut().find(|c| c.id == id) else { return Vec::new() };
         clip.pinned = !clip.pinned;
         self.trim();
@@ -373,7 +371,7 @@ impl Machine {
     }
 
     fn delete(&mut self, id: ClipId) -> Vec<Effect> {
-        let selected = self.shown().get(self.selected).map(|c| c.id).filter(|s| *s != id);
+        let selected = self.selected_id().filter(|s| *s != id);
         self.clips.retain(|c| c.id != id);
         self.follow(selected);
         self.changed()
