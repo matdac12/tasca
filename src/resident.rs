@@ -35,16 +35,25 @@ fn on_show(_hwnd: HWND) {
 }
 
 /// Where the History stands. The window is made once (its class is never
-/// unregistered), and switching the History off only removes the clipboard
-/// listener and the shortcut, so it can come back without a restart.
+/// unregistered, so a second `create` always fails), and switching the History
+/// off only removes the clipboard listener and the shortcut, so it can come
+/// back without a restart.
 #[derive(Clone, Copy, Default)]
 struct HistoryState {
     created: bool,
+    /// `create` failed once: it is never retried in this run.
+    create_failed: bool,
     listening: bool,
 }
 
 thread_local! {
-    static HISTORY: Cell<HistoryState> = const { Cell::new(HistoryState { created: false, listening: false }) };
+    static HISTORY: Cell<HistoryState> = const { Cell::new(HistoryState { created: false, create_failed: false, listening: false }) };
+}
+
+/// The History is recording and open-able right now. The tray, the tooltip,
+/// the show message and the reader all ask this one question.
+pub fn history_running() -> bool {
+    HISTORY.get().listening
 }
 
 fn set_listener(hwnd: HWND, on: bool) -> bool {
@@ -67,16 +76,65 @@ fn set_listener(hwnd: HWND, on: bool) -> bool {
     }
 }
 
-/// Resident startup with the History on.
-fn start_history(hwnd: HWND, shortcut: Option<hotkey::Hotkey>) {
+/// `history::create` adds the listener but does not say whether it worked.
+/// Take it off (silently: it may not be there) and put it back to find out.
+fn confirm_listener(hwnd: HWND) -> bool {
+    unsafe {
+        let _ = RemoveClipboardFormatListener(hwnd);
+    }
+    set_listener(hwnd, true)
+}
+
+/// Make the History window once. `false` when that failed (then never again).
+fn create_history(hwnd: HWND) -> std::result::Result<(), String> {
+    let mut state = HISTORY.get();
     match history::create(hwnd) {
         Ok(()) => {
-            HISTORY.set(HistoryState { created: true, listening: true });
-            let fallback = hotkey::Hotkey::HISTORY_DEFAULT;
-            let _ = hotkey::start(hwnd, hotkey::Slot::History, shortcut, Some(fallback));
+            state.created = true;
+            state.listening = confirm_listener(hwnd);
+            HISTORY.set(state);
+            Ok(())
         }
-        Err(e) => log(format!("history failed to start, no History shortcut: {e:?}")),
+        Err(e) => {
+            state.create_failed = true;
+            HISTORY.set(state);
+            log(format!("history failed to start, not retried: {e:?}"));
+            Err(format!("Clipboard history could not start ({e:?}). Restart Tasca to try again."))
+        }
     }
+}
+
+/// Resident startup with the History on.
+fn start_history(hwnd: HWND, shortcut: Option<hotkey::Hotkey>) {
+    if create_history(hwnd).is_ok() {
+        let fallback = hotkey::Hotkey::HISTORY_DEFAULT;
+        let _ = hotkey::start(hwnd, hotkey::Slot::History, shortcut, Some(fallback));
+    }
+}
+
+/// The History as it was before a Settings apply, to put back if a later
+/// step of that apply fails.
+pub struct HistoryBackup {
+    state: HistoryState,
+    shortcut: hotkey::Snapshot,
+}
+
+pub fn history_backup() -> HistoryBackup {
+    HistoryBackup { state: HISTORY.get(), shortcut: hotkey::snapshot(hotkey::Slot::History) }
+}
+
+/// Undo `set_history`: listener and shortcut as `backup` saw them. The window
+/// stays (it cannot be made twice).
+pub fn restore_history(hwnd: HWND, backup: HistoryBackup) {
+    let now = HISTORY.get();
+    let mut state = backup.state;
+    state.created |= now.created;
+    state.create_failed |= now.create_failed;
+    if now.listening != state.listening && !set_listener(hwnd, state.listening) {
+        state.listening = now.listening;
+    }
+    HISTORY.set(state);
+    hotkey::restore(hwnd, hotkey::Slot::History, backup.shortcut);
 }
 
 /// Settings OK: switch the History on or off and give it `shortcut`. Off
@@ -84,25 +142,26 @@ fn start_history(hwnd: HWND, shortcut: Option<hotkey::Hotkey>) {
 /// stays on disk. On, a refused or taken shortcut is the error, and the
 /// History is left as it was.
 pub fn set_history(hwnd: HWND, on: bool, shortcut: Option<hotkey::Hotkey>) -> std::result::Result<(), String> {
+    let backup = history_backup();
     let mut state = HISTORY.get();
-    let was_listening = state.listening;
     if on {
+        if state.create_failed {
+            // Already reported at startup; failing every OK would block the
+            // other settings for the rest of the run.
+            log("history: not started this run, nothing to switch on");
+            return Ok(());
+        }
         if !state.created {
-            history::create(hwnd).map_err(|e| format!("Clipboard history could not start ({e:?})"))?;
-            state = HistoryState { created: true, listening: true };
+            create_history(hwnd)?;
         } else if !state.listening {
             if !set_listener(hwnd, true) {
                 return Err("Clipboard history could not start listening".to_string());
             }
             state.listening = true;
+            HISTORY.set(state);
         }
-        HISTORY.set(state);
         if let Err(e) = hotkey::change(hwnd, hotkey::Slot::History, shortcut) {
-            if !was_listening {
-                set_listener(hwnd, false);
-                state.listening = false;
-                HISTORY.set(state);
-            }
+            restore_history(hwnd, backup);
             return Err(e);
         }
     } else {
@@ -121,7 +180,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         if let Some(r) = shelf::handle(hwnd, msg, wp, lp) {
             return r;
         }
-        if msg == WM_SHOW_HISTORY && !HISTORY.get().listening {
+        if msg == WM_SHOW_HISTORY && !history_running() {
             log("show history ignored: the History is off");
             return LRESULT(0);
         }

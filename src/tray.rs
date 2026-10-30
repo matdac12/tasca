@@ -22,7 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::hotkey::{self, Hotkey, Slot};
 use crate::log::log;
 use crate::proto::{WM_SHOW_HISTORY, WM_TRAY};
-use crate::{settings, settings_win, shelf};
+use crate::{settings_win, shelf};
 
 /// Resource id of the icon in `tasca.rc`.
 const ICON_ID: u16 = 1;
@@ -177,7 +177,7 @@ pub fn refresh() {
 /// The tooltip for the shortcuts and settings as they are now.
 pub fn current_tip() -> String {
     let (shortcut, error) = hotkey::display(Slot::Shelf);
-    let history = settings::current().history.then(|| hotkey::display(Slot::History));
+    let history = crate::resident::history_running().then(|| hotkey::display(Slot::History));
     tip(
         (shortcut, error.as_deref()),
         history.as_ref().map(|(hk, e)| (*hk, e.as_deref())),
@@ -231,7 +231,7 @@ fn menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(menu, MF_STRING, ID_SHOW, w!("Show shelf"));
-        let history_flags = if settings::current().history { MF_STRING } else { MF_STRING | MF_GRAYED };
+        let history_flags = if crate::resident::history_running() { MF_STRING } else { MF_STRING | MF_GRAYED };
         let _ = AppendMenuW(menu, history_flags, ID_HISTORY, w!("Show clipboard history"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Settings\u{2026}"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);

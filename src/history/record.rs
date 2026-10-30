@@ -86,11 +86,18 @@ thread_local! {
     static FLIGHT: Cell<Flight> = const { Cell::new(Flight { running: false, stale: false }) };
 }
 
-pub fn start(hwnd: HWND, own_window: HWND) {
+/// Add the listener; `false` when Windows refused it (nothing is recorded then).
+pub fn start(hwnd: HWND, own_window: HWND) -> bool {
     OWN_WINDOW.store(own_window.0 as isize, Ordering::Relaxed);
     match unsafe { AddClipboardFormatListener(hwnd) } {
-        Ok(()) => log("history: clipboard listener on"),
-        Err(e) => log(format!("history: AddClipboardFormatListener failed: {e:?}")),
+        Ok(()) => {
+            log("history: clipboard listener on");
+            true
+        }
+        Err(e) => {
+            log(format!("history: AddClipboardFormatListener failed: {e:?}"));
+            false
+        }
     }
 }
 
@@ -120,7 +127,7 @@ pub fn on_read(hwnd: HWND) {
         spawn(hwnd);
     }
     // A read that lands after the History was switched off is dropped.
-    let on = crate::settings::current().history;
+    let on = crate::resident::history_running();
     for outcome in done {
         match outcome {
             Outcome::Copy(c) if on => super::dispatch(Event::Copied(c)),
@@ -184,9 +191,10 @@ impl Marks {
 }
 
 /// Skip this copy? Only while "Skip private copies" is on; with it off a
-/// private copy is an ordinary one.
-fn skip_as_private(marks: &Marks, skip_private: bool) -> bool {
-    skip_private && marks.is_private()
+/// private copy is an ordinary one, and the clipboard is not even asked
+/// (`is_private` is not called).
+fn skip_as_private(skip_private: bool, is_private: impl FnOnce() -> bool) -> bool {
+    skip_private && is_private()
 }
 
 /// The registered format ids of the marks (ids never change once registered).
@@ -209,16 +217,30 @@ fn mark_formats() -> &'static MarkFormats {
     })
 }
 
-/// The marks on the open clipboard.
-fn read_marks() -> Marks {
+/// Is the open clipboard marked private? Reads the marks one at a time and
+/// stops at the first, so the DWORD marks (whose `GetClipboardData` can make
+/// another app render) are only touched when the cheap checks found nothing.
+fn read_private() -> bool {
     let f = mark_formats();
     let present = |format: u32| format != 0 && unsafe { IsClipboardFormatAvailable(format) }.is_ok();
-    Marks {
-        exclude_from_monitoring: present(f.exclude_from_monitoring),
-        viewer_ignore: present(f.viewer_ignore),
-        can_include_in_history: present(f.can_include_in_history).then(|| dword(f.can_include_in_history)).flatten(),
-        can_upload_to_cloud: present(f.can_upload_to_cloud).then(|| dword(f.can_upload_to_cloud)).flatten(),
+    let mut marks = Marks { exclude_from_monitoring: present(f.exclude_from_monitoring), ..Marks::default() };
+    if marks.is_private() {
+        return true;
     }
+    marks.viewer_ignore = present(f.viewer_ignore);
+    if marks.is_private() {
+        return true;
+    }
+    if present(f.can_include_in_history) {
+        marks.can_include_in_history = dword(f.can_include_in_history);
+        if marks.is_private() {
+            return true;
+        }
+    }
+    if present(f.can_upload_to_cloud) {
+        marks.can_upload_to_cloud = dword(f.can_upload_to_cloud);
+    }
+    marks.is_private()
 }
 
 /// A DWORD-valued format; a mark whose value cannot be read does not count.
@@ -260,7 +282,7 @@ impl Drop for Open {
 /// What the clipboard holds now; `None` when it could not be opened (busy).
 fn read() -> Option<Outcome> {
     let _open = Open::new()?;
-    if skip_as_private(&read_marks(), crate::settings::current().skip_private) {
+    if skip_as_private(crate::settings::current().skip_private, read_private) {
         return Some(Outcome::Private);
     }
     let seq = unsafe { GetClipboardSequenceNumber() };
@@ -321,33 +343,38 @@ mod tests {
     #[test]
     fn each_private_mark_is_skipped_with_the_setting_on() {
         for marks in private_marks() {
-            assert!(skip_as_private(&marks, true), "{marks:?}");
+            assert!(skip_as_private(true, || marks.is_private()), "{marks:?}");
         }
     }
 
     #[test]
     fn each_private_mark_is_recorded_with_the_setting_off() {
         for marks in private_marks() {
-            assert!(!skip_as_private(&marks, false), "{marks:?}");
+            assert!(!skip_as_private(false, || marks.is_private()), "{marks:?}");
         }
     }
 
     #[test]
     fn an_unmarked_copy_is_recorded_either_way() {
-        assert!(!skip_as_private(&CLEAN, true));
-        assert!(!skip_as_private(&CLEAN, false));
-        assert!(!skip_as_private(&Marks::default(), true));
+        assert!(!skip_as_private(true, || CLEAN.is_private()));
+        assert!(!skip_as_private(false, || CLEAN.is_private()));
+        assert!(!skip_as_private(true, || Marks::default().is_private()));
+    }
+
+    #[test]
+    fn the_clipboard_is_not_asked_when_the_setting_is_off() {
+        assert!(!skip_as_private(false, || panic!("marks read with Skip private copies off")));
     }
 
     #[test]
     fn the_dword_marks_only_count_when_zero() {
         for value in [1, 2, u32::MAX] {
             let marks = Marks { can_include_in_history: Some(value), can_upload_to_cloud: Some(value), ..CLEAN };
-            assert!(!skip_as_private(&marks, true), "{value}");
+            assert!(!skip_as_private(true, || marks.is_private()), "{value}");
         }
         // One DWORD mark at 1 does not cancel another mark.
         let marks = Marks { can_include_in_history: Some(1), viewer_ignore: true, ..CLEAN };
-        assert!(skip_as_private(&marks, true));
+        assert!(skip_as_private(true, || marks.is_private()));
     }
 
     #[test]

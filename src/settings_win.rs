@@ -871,19 +871,38 @@ fn on_ok(hwnd: HWND) {
         invalidate(field);
         let _ = unsafe { SetFocus(Some(field)) };
     };
-    // Both fields were checked against each other while recording, but the
-    // live shortcuts are what `change` compares with: a swap needs two OKs.
+    // `change` compares a new chord with the other slot's live one, so the
+    // order matters when one pending chord is the other slot's current one.
     // (No `UI` borrow is held across these calls: they pump messages.)
-    let shelf_before = hotkey::display(Slot::Shelf).0;
-    if let Err(e) = hotkey::change(parent, Slot::Shelf, pending[Slot::Shelf as usize]) {
-        refuse(Slot::Shelf, &e);
-        return;
-    }
     let history_shortcut = pending[Slot::History as usize];
-    if let Err(e) = crate::resident::set_history(parent, history_on, history_shortcut) {
-        refuse(Slot::History, &e);
-        // Nothing is saved, so the Shelf shortcut goes back to what it was.
-        let _ = hotkey::change(parent, Slot::Shelf, shelf_before);
+    let shelf_snapshot = hotkey::snapshot(Slot::Shelf);
+    let history_backup = crate::resident::history_backup();
+    let history_first = history_goes_first(
+        pending[Slot::Shelf as usize],
+        pending[Slot::History as usize],
+        hotkey::display(Slot::History).0,
+    );
+    let apply_shelf = || hotkey::change(parent, Slot::Shelf, pending[Slot::Shelf as usize]);
+    let apply_history = || crate::resident::set_history(parent, history_on, history_shortcut);
+    // A step that fails restores itself; the one that already succeeded is
+    // put back here, because nothing is saved after a failure.
+    let failure = if history_first {
+        apply_history().err().map(|e| (Slot::History, e)).or_else(|| {
+            apply_shelf().err().map(|e| {
+                crate::resident::restore_history(parent, history_backup);
+                (Slot::Shelf, e)
+            })
+        })
+    } else {
+        apply_shelf().err().map(|e| (Slot::Shelf, e)).or_else(|| {
+            apply_history().err().map(|e| {
+                hotkey::restore(parent, Slot::Shelf, shelf_snapshot);
+                (Slot::History, e)
+            })
+        })
+    };
+    if let Some((slot, e)) = failure {
+        refuse(slot, &e);
         tray::refresh();
         return;
     }
@@ -930,6 +949,18 @@ fn on_ok(hwnd: HWND) {
     });
     log("settings applied");
     let _ = unsafe { DestroyWindow(hwnd) };
+}
+
+/// Apply the History first when the Shelf's new chord is the one the History
+/// has now and the History is moving off it (the user freed Alt+V in the
+/// History field and took it in the Shelf field). Otherwise the Shelf goes
+/// first, which also covers the reverse case.
+fn history_goes_first(
+    pending_shelf: Option<Hotkey>,
+    pending_history: Option<Hotkey>,
+    live_history: Option<Hotkey>,
+) -> bool {
+    pending_shelf.is_some() && pending_shelf == live_history && pending_history != live_history
 }
 
 fn invalidate(hwnd: HWND) {
@@ -1490,6 +1521,23 @@ mod tests {
         for (i, a) in ids.iter().enumerate() {
             assert!(ids[i + 1..].iter().all(|b| a != b), "{a} used twice");
         }
+    }
+
+    #[test]
+    fn the_history_moves_first_when_the_shelf_takes_its_current_chord() {
+        let alt_v = Hotkey::parse("Alt+V");
+        let ctrl_alt_h = Hotkey::parse("Ctrl+Alt+H");
+        let ctrl_alt_d = Hotkey::parse("Ctrl+Alt+D");
+        // History moves to Ctrl+Alt+H, Shelf takes Alt+V.
+        assert!(history_goes_first(alt_v, ctrl_alt_h, alt_v));
+        // History cleared, Shelf takes Alt+V.
+        assert!(history_goes_first(alt_v, None, alt_v));
+        // Nothing of the Shelf's new chord is held by the History: usual order.
+        assert!(!history_goes_first(ctrl_alt_d, alt_v, alt_v));
+        // The History keeps the chord (the recorder already refuses the Shelf taking it).
+        assert!(!history_goes_first(alt_v, alt_v, alt_v));
+        // No Shelf shortcut.
+        assert!(!history_goes_first(None, ctrl_alt_h, None));
     }
 
     #[test]
