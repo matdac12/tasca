@@ -34,3 +34,12 @@ _Avoid_: Saved clip, favourite
 **Private copy**:
 A copy the source app marked "do not record" (password managers do). Skipped by default; when the user allows them, it becomes an ordinary Clip.
 _Avoid_: Secret, sensitive clip
+
+## Snippets
+
+**Snippet**:
+Text kept on purpose, with a title and a body, listed newest first. Separate from a Clip.
+_Avoid_: Clip, Item
+
+**Save as snippet**:
+Keep a Clip's text as a Snippet. The same text again moves that Snippet to the top and keeps its title.

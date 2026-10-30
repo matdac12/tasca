@@ -7,7 +7,7 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, PostMessageW, SetForegroundWindow, TrackPopupMenu, MF_SEPARATOR,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, PostMessageW, SetForegroundWindow, TrackPopupMenu, MF_GRAYED, MF_SEPARATOR,
     MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
@@ -17,6 +17,7 @@ const ID_PASTE: usize = 1;
 const ID_PLAIN: usize = 2;
 const ID_PIN: usize = 3;
 const ID_DELETE: usize = 4;
+const ID_SNIPPET: usize = 5;
 
 /// The action a menu command id stands for.
 fn action_of(cmd: i32) -> Option<Action> {
@@ -25,6 +26,7 @@ fn action_of(cmd: i32) -> Option<Action> {
         ID_PLAIN => Some(Action::PastePlain),
         ID_PIN => Some(Action::TogglePin),
         ID_DELETE => Some(Action::Delete),
+        ID_SNIPPET => Some(Action::SaveSnippet),
         _ => None,
     }
 }
@@ -35,12 +37,15 @@ fn pin_label(pinned: bool) -> PCWSTR {
 }
 
 /// Show the menu for a Clip at client point (`x`, `y`) of `hwnd` and wait for a
-/// choice. `None` when it was dismissed.
-pub fn pick(hwnd: HWND, pinned: bool, x: i32, y: i32) -> Option<Action> {
+/// choice. `None` when it was dismissed. `can_snippet` is false for an image,
+/// which has no text to keep.
+pub fn pick(hwnd: HWND, pinned: bool, can_snippet: bool, x: i32, y: i32) -> Option<Action> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
         let _ = AppendMenuW(menu, MF_STRING, ID_PASTE, w!("Paste"));
         let _ = AppendMenuW(menu, MF_STRING, ID_PLAIN, w!("Paste as plain text"));
+        let snippet_flags = if can_snippet { MF_STRING } else { MF_STRING | MF_GRAYED };
+        let _ = AppendMenuW(menu, snippet_flags, ID_SNIPPET, w!("Save as snippet"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_PIN, pin_label(pinned));
         let _ = AppendMenuW(menu, MF_STRING, ID_DELETE, w!("Delete"));
@@ -65,6 +70,7 @@ mod tests {
         assert_eq!(action_of(ID_PLAIN as i32), Some(Action::PastePlain));
         assert_eq!(action_of(ID_PIN as i32), Some(Action::TogglePin));
         assert_eq!(action_of(ID_DELETE as i32), Some(Action::Delete));
+        assert_eq!(action_of(ID_SNIPPET as i32), Some(Action::SaveSnippet));
         assert_eq!(action_of(0), None);
     }
 }

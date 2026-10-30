@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::hotkey::{self, Hotkey, Slot};
 use crate::log::log;
-use crate::proto::{WM_SHOW_HISTORY, WM_TRAY};
+use crate::proto::{WM_SHOW_HISTORY, WM_SHOW_SNIPPETS, WM_TRAY};
 use crate::{settings_win, shelf};
 
 /// Resource id of the icon in `tasca.rc`.
@@ -32,6 +32,7 @@ const ID_SHOW: usize = 1;
 const ID_SETTINGS: usize = 2;
 const ID_QUIT: usize = 3;
 const ID_HISTORY: usize = 4;
+const ID_SNIPPETS: usize = 5;
 
 /// `NIN_SELECT` (NOTIFYICON_VERSION_4); harmless in classic mode.
 const NIN_SELECT: u32 = 1024;
@@ -233,6 +234,7 @@ fn menu(hwnd: HWND) {
         let _ = AppendMenuW(menu, MF_STRING, ID_SHOW, w!("Show shelf"));
         let history_flags = if crate::resident::history_running() { MF_STRING } else { MF_STRING | MF_GRAYED };
         let _ = AppendMenuW(menu, history_flags, ID_HISTORY, w!("Show clipboard history"));
+        let _ = AppendMenuW(menu, MF_STRING, ID_SNIPPETS, w!("Show snippets"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Settings\u{2026}"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit"));
@@ -262,6 +264,10 @@ fn menu(hwnd: HWND) {
                 log("tray: show clipboard history");
                 // Posted, not called, so the menu is gone before the History opens.
                 let _ = PostMessageW(Some(hwnd), WM_SHOW_HISTORY, WPARAM(0), LPARAM(0));
+            }
+            ID_SNIPPETS => {
+                log("tray: show snippets");
+                let _ = PostMessageW(Some(hwnd), WM_SHOW_SNIPPETS, WPARAM(0), LPARAM(0));
             }
             ID_SETTINGS => {
                 log("tray: settings");

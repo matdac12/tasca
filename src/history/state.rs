@@ -96,6 +96,8 @@ pub enum Action {
     PastePlain,
     TogglePin,
     Delete,
+    /// Keep the Clip's text as a Snippet. An image has none.
+    SaveSnippet,
 }
 
 /// Modifiers held when a key went down.
@@ -162,6 +164,8 @@ pub enum Effect {
     Save,
     /// An action was ignored; the shell logs why.
     Refused(Refusal),
+    /// Hand this text to Snippets. The History itself does not change.
+    SaveSnippet { text: String },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,6 +174,8 @@ pub enum Refusal {
     TooManyPins,
     /// Delete and Clear wait for the stored History: it would bring them back.
     NotLoaded,
+    /// An image (or blank text) has nothing to save as a Snippet.
+    NoText,
 }
 
 /// The sizes a Clip stores, for the 10 MB cap (an image counts as its PNG).
@@ -416,6 +422,13 @@ impl Machine {
             Action::PastePlain => self.paste_row(row, true, now_ms),
             Action::TogglePin => self.toggle_pin(id),
             Action::Delete => self.delete(id),
+            Action::SaveSnippet => {
+                let Some(clip) = self.clips.iter().find(|c| c.id == id) else { return Vec::new() };
+                match super::text::snippet_text(clip) {
+                    Some(text) => vec![Effect::SaveSnippet { text }],
+                    None => vec![Effect::Refused(Refusal::NoText)],
+                }
+            }
         }
     }
 
@@ -1463,5 +1476,29 @@ mod tests {
         m.go(Event::Loaded(vec![saved]));
         assert_eq!(m.clips().len(), 1);
         assert!(m.clips()[0].pinned);
+    }
+
+    #[test]
+    fn save_as_snippet_keeps_text_and_file_paths_and_skips_images() {
+        let mut m = with(&["  hello \n"]);
+        m.go(Event::Opened(Some(APP)));
+        let id = m.clips()[0].id;
+        assert_eq!(m.go(Event::ClipAction { id, action: Action::SaveSnippet }), [Effect::SaveSnippet { text: "  hello".into() }]);
+        assert_eq!(texts(&m), ["  hello \n"]);
+
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { seq: 1, files: Some(vec!["C:\\a.txt".into(), "D:\\b".into()]), ..Capture::default() }));
+        m.go(Event::Opened(Some(APP)));
+        let id = m.clips()[0].id;
+        assert_eq!(
+            m.go(Event::ClipAction { id, action: Action::SaveSnippet }),
+            [Effect::SaveSnippet { text: "C:\\a.txt\nD:\\b".into() }]
+        );
+
+        let mut m = Machine::default();
+        m.go(Event::Copied(Capture { image: img(3), ..cap(1) }));
+        m.go(Event::Opened(Some(APP)));
+        let id = m.clips()[0].id;
+        assert_eq!(m.go(Event::ClipAction { id, action: Action::SaveSnippet }), [Effect::Refused(Refusal::NoText)]);
     }
 }

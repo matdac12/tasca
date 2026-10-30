@@ -25,8 +25,9 @@ Rules for anyone (human or agent) changing this repo.
   (parsing, the safe-shortcut rule, `RegisterHotKey`), `settings.rs`
   (`settings.ini`, pure), `settings_win.rs` (the Settings window and key
   recorder), `tray.rs`, `startup.rs` (the `Tasca.lnk` shortcut), `log.rs`,
-  `proto.rs`. New features get their own module; wire them in through the
-  hooks in `resident.rs`, and give every new `WM_APP+n` a line in `proto.rs`.
+  `proto.rs`, `snippets/` (saved text: list, editor, store). New features
+  get their own module; wire them in through the hooks in `resident.rs`,
+  and give every new `WM_APP+n` a line in `proto.rs`.
 - **Re-entrancy:** release builds use `panic = "abort"`. Never hold a
   `RefCell` borrow across a call that can pump messages (menus, dialogs,
   `MessageBoxW`, COM); clone what you need and drop the borrow first.

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Snippets: text kept on purpose, separate from the History. **Show snippets**
+  in the tray opens a dark panel at the pointer. Enter or a click copies the
+  snippet to the clipboard and closes the panel; **New** (or Ctrl+N) and Edit
+  (or Ctrl+E) open a small window; Delete removes one. Alt+1..9 copies that
+  row.
+- **Save as snippet** on a History row. Text is kept as typed; copied files
+  are kept as their paths. An image has nothing to save. The same text again
+  moves that snippet to the top and keeps its title.
+- Snippets are stored under `%LOCALAPPDATA%\Tasca\snippets\`, newest first,
+  up to 200, each at most 64 KB. A damaged store loads empty.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

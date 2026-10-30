@@ -19,7 +19,7 @@ use crate::log::{log, now_ms, truncate};
 use crate::proto::{
     CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SETTINGS_SAVED, WM_SHOW, WM_SHOW_HISTORY, WM_TOGGLE,
 };
-use crate::{history, hotkey, park, settings, settings_win, shelf, tray};
+use crate::{history, hotkey, park, settings, settings_win, shelf, snippets, tray};
 
 /// Caps+D while resident.
 fn on_toggle(_hwnd: HWND) {
@@ -155,6 +155,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         if let Some(r) = history::handle(hwnd, msg, wp, lp) {
             return r;
         }
+        if let Some(r) = snippets::handle(msg) {
+            return r;
+        }
         if msg == tray::taskbar_created() {
             tray::re_add();
             return LRESULT(0);
@@ -193,6 +196,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 tray::remove();
                 hotkey::unregister(hwnd);
                 history::destroy(hwnd);
+                snippets::destroy();
                 settings_win::close();
                 park::revoke(hwnd);
                 shelf::destroy();
@@ -280,6 +284,9 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             start_history(hwnd, configured.history_shortcut);
         } else {
             log("settings: clipboard history off");
+        }
+        if let Err(e) = snippets::create(hwnd) {
+            log(format!("snippets failed to start: {e:?}"));
         }
         tray::add(hwnd, tray::current_tip());
         #[cfg(debug_assertions)]
