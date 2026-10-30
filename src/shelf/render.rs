@@ -62,16 +62,16 @@ pub fn badge_w(count: usize) -> f32 {
     15.0 + (digits - 2.0).max(0.0) * 5.0
 }
 
-struct Surface {
-    dc: HDC,
+pub(crate) struct Surface {
+    pub(crate) dc: HDC,
     bmp: HBITMAP,
     old: HGDIOBJ,
-    w: i32,
-    h: i32,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
 }
 
 impl Surface {
-    fn new(w: i32, h: i32) -> Result<Self> {
+    pub(crate) fn new(w: i32, h: i32) -> Result<Self> {
         unsafe {
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -126,7 +126,7 @@ pub struct Renderer {
 
 /// `FONT` if installed, else `FONT_FALLBACK`. DirectWrite does not fail on a
 /// missing family (it substitutes silently), so ask the collection.
-fn font_family(dw: &IDWriteFactory) -> HSTRING {
+pub(crate) fn font_family(dw: &IDWriteFactory) -> HSTRING {
     let preferred = HSTRING::from(FONT);
     let installed = unsafe {
         let mut coll = None;
@@ -140,7 +140,7 @@ fn font_family(dw: &IDWriteFactory) -> HSTRING {
 }
 
 /// A single-line, ellipsis-trimmed text format.
-pub(super) fn text_format(
+pub(crate) fn text_format(
     dw: &IDWriteFactory,
     family: &HSTRING,
     size: f32,
@@ -170,11 +170,11 @@ pub(super) fn text_format(
     }
 }
 
-pub(super) fn wide(s: &str) -> Vec<u16> {
+pub(crate) fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-pub(super) fn rr(l: f32, t: f32, r: f32, b: f32, rad: f32) -> D2D1_ROUNDED_RECT {
+pub(crate) fn rr(l: f32, t: f32, r: f32, b: f32, rad: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: l, top: t, right: r, bottom: b }, radiusX: rad, radiusY: rad }
 }
 

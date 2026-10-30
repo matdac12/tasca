@@ -17,7 +17,7 @@ pub mod layout;
 pub mod model;
 mod open;
 pub mod probe;
-mod render;
+pub(crate) mod render;
 mod takeout;
 mod tiles;
 mod window;
@@ -107,7 +107,7 @@ fn cursor_monitor() -> (u32, WorkArea) {
 
 /// Debug builds only: `TASCA_DEV_DPI=144` renders at 150 % whatever the
 /// monitor says (screenshots on a 100 % screen). Release builds ignore it.
-fn dev_dpi() -> Option<u32> {
+pub(crate) fn dev_dpi() -> Option<u32> {
     #[cfg(debug_assertions)]
     if let Some(d) = std::env::var("TASCA_DEV_DPI").ok().and_then(|v| v.parse().ok()) {
         return Some(d);

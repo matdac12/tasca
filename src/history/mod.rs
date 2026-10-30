@@ -7,7 +7,9 @@
 //! - `record.rs`  clipboard listener and read (the private-copy filter point)
 //! - `paste.rs`   paste-back: write, restore the target, release modifiers, Ctrl+V
 //! - `window.rs`  the window class, placement, wndproc
-//! - `draw.rs`    what the window shows
+//! - `draw.rs`    what the window shows (Direct2D, like the Shelf)
+//! - `layout.rs`  the panel's geometry and hit-testing (pure)
+//! - `text.rs`    row titles, type lines, ages (pure)
 //!
 //! All state lives on the UI thread in `SHELL`. The machine is stepped inside
 //! a short borrow; its effects are carried out after the borrow is dropped, so
@@ -16,12 +18,15 @@
 
 mod clip;
 mod draw;
+mod layout;
 mod paste;
 mod record;
 mod state;
+mod text;
 mod window;
 
 use std::cell::RefCell;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::Result;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
@@ -30,6 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_HOTKEY, WM
 use crate::hotkey::Slot;
 use crate::log::log;
 use crate::proto::{WM_HISTORY_READ, WM_SHOW_HISTORY};
+use layout::{Hit, Layout};
 use state::{Effect, Event, Machine, Target};
 
 /// Not exported by the `windows` features we enable.
@@ -48,6 +54,25 @@ struct Shell {
     pointer: (i32, i32),
     gap: i32,
     work: window::Work,
+    /// Row under the pointer.
+    hover: Option<usize>,
+    /// List scroll in DIP; follows the selection, and the wheel moves it.
+    scroll: f32,
+    /// The selection the scroll last followed.
+    followed: usize,
+    /// Recording copies (the clipboard listener is registered).
+    listening: bool,
+}
+
+impl Shell {
+    fn layout(&self) -> Layout {
+        Layout::new(self.scale, self.machine.clips().len(), 0, false)
+    }
+}
+
+/// Milliseconds since the Unix epoch: the machine's clock.
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 thread_local! {
@@ -71,14 +96,31 @@ pub fn create(resident: HWND) -> Result<()> {
     let window = window::create()?;
     SHELL.with(|c| {
         *c.borrow_mut() =
-            Some(Shell { resident, window, machine: Machine::default(), scale: 1.0, pointer: (0, 0), gap: 0, work: window::Work::default() })
+            Some(Shell {
+            resident,
+            window,
+            machine: Machine::default(),
+            scale: 1.0,
+            pointer: (0, 0),
+            gap: 0,
+            work: window::Work::default(),
+            hover: None,
+            scroll: 0.0,
+            followed: 0,
+            listening: true,
+        })
     });
+    if let Err(e) = draw::init() {
+        log(format!("history: renderer not ready yet: {e}"));
+    }
     record::start(resident, window);
     Ok(())
 }
 
 pub fn destroy(resident: HWND) {
     record::stop(resident);
+    with(|s| s.listening = false);
+    draw::destroy();
     if let Some(shell) = SHELL.with(|c| c.borrow_mut().take()) {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(shell.window);
@@ -111,16 +153,45 @@ fn toggle() {
     }
 }
 
+/// The app to paste back into: the foreground window, unless there is none or
+/// it is one of ours (the History window, or the resident when the tray menu
+/// opened the History), which cannot take a paste.
+fn paste_target(foreground: isize, history: isize, resident: isize) -> Option<Target> {
+    (foreground != 0 && foreground != history && foreground != resident).then_some(Target(foreground))
+}
+
+/// Start or stop recording copies (the Settings switch for the History).
+#[allow(dead_code)] // resident.rs switches to it after the merge
+pub fn set_listening(resident: HWND, on: bool) {
+    let Some((window, change)) = with(|s| (s.window, switch(&mut s.listening, on))) else { return };
+    if !change {
+        return;
+    }
+    if on {
+        record::start(resident, window);
+    } else {
+        record::stop(resident);
+    }
+}
+
+/// Move a switch to `on`; `true` when that changed it (so the listener is
+/// added or removed once, never twice).
+fn switch(current: &mut bool, on: bool) -> bool {
+    std::mem::replace(current, on) != on
+}
+
 /// Open at the pointer, remembering the app to paste back into.
 fn open() {
-    let Some((window, rows, already)) = with(|s| (s.window, s.machine.clips().len(), s.machine.is_open())) else {
+    let Some((window, resident, rows, already)) =
+        with(|s| (s.window, s.resident, s.machine.clips().len(), s.machine.is_open()))
+    else {
         return;
     };
     if already {
         return; // keep the paste target and the selection
     }
     let foreground = unsafe { GetForegroundWindow() };
-    let target = (!foreground.is_invalid() && foreground != window).then_some(Target(foreground.0 as isize));
+    let target = paste_target(foreground.0 as isize, window.0 as isize, resident.0 as isize);
     let (pointer, work, dpi) = window::pointer_monitor();
     let scale = dpi as f32 / 96.0;
     let gap = window::pointer_gap(scale);
@@ -129,15 +200,26 @@ fn open() {
         s.pointer = pointer;
         s.gap = gap;
         s.work = work;
+        s.hover = None;
+        s.scroll = 0.0;
+        s.followed = 0;
     });
-    let (origin, _) = window::frame(pointer, gap, rows, scale, work);
-    log(format!("history: open at {origin:?}, dpi {dpi}, {rows} clips, target {target:?}"));
+    log(format!("history: open at {pointer:?}, dpi {dpi}, {rows} clips, target {target:?}"));
     dispatch(Event::Opened(target));
 }
 
 /// Step the machine, then carry out its effects outside the borrow.
 fn dispatch(event: Event) {
-    let Some(effects) = with(|s| s.machine.step(event)) else { return };
+    let now = now_ms();
+    let Some(effects) = with(|s| {
+        // A read that was already in flight when recording was switched off.
+        if !s.listening && matches!(event, Event::Copied(_)) {
+            return Vec::new();
+        }
+        s.machine.step(event, now)
+    }) else {
+        return;
+    };
     for effect in effects {
         apply(effect);
     }
@@ -149,27 +231,144 @@ fn apply(effect: Effect) {
         Effect::Add(id) => log(format!("history: recorded clip {}", id.0)),
         Effect::MoveToTop(id) => log(format!("history: clip {} to the top", id.0)),
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
-        Effect::Redraw => {
-            let frame = with(|s| window::frame(s.pointer, s.gap, s.machine.clips().len(), s.scale, s.work));
-            if let Some((origin, size)) = frame {
-                if !window::show(window, origin, size) {
-                    dispatch(Event::Deactivated);
-                }
-            }
-        }
+        Effect::Redraw => redraw(),
         Effect::Close => window::hide(window),
         Effect::Paste { clip, target } => paste::paste(resident, window, &clip, target),
         Effect::Copy { clip } => paste::copy(resident, window, &clip),
     }
 }
 
-/// What the window shows now (for `WM_PAINT`).
-fn view() -> Option<draw::View> {
-    with(|s| {
-        let clips = s.machine.clips();
-        let first = draw::first_visible(s.machine.selected());
-        let rows: Vec<String> = clips.iter().skip(first).take(draw::MAX_ROWS).map(|c| draw::one_line(&c.text)).collect();
-        let selected = (!clips.is_empty()).then(|| s.machine.selected() - first);
-        draw::View { rows, selected, scale: s.scale }
-    })
+/// Render the panel for the machine's state and show it (or update it).
+fn redraw() {
+    let now = now_ms();
+    let Some((window, view, origin)) = with(|s| {
+        let layout = s.layout();
+        let selected = s.machine.selected();
+        if selected != s.followed {
+            s.followed = selected;
+            s.scroll = layout.scroll_to_show(s.scroll, selected);
+        }
+        s.scroll = layout.clamp_scroll(s.scroll);
+        let (origin, _) = window::frame(s.pointer, s.gap, &layout, s.work);
+        // Rows may have moved under a pointer that did not: look again.
+        s.hover = hover_at(&layout, window::cursor(), origin, s.scroll);
+        (s.window, view(s, layout, now), origin)
+    }) else {
+        return;
+    };
+    if !window::show(window, &view, origin) {
+        dispatch(Event::Deactivated);
+    }
+}
+
+/// The row under a screen point, for a window at `origin`.
+fn hover_at(layout: &Layout, pointer: (i32, i32), origin: (i32, i32), scroll: f32) -> Option<usize> {
+    match layout.hit(pointer.0 - origin.0, pointer.1 - origin.1, scroll) {
+        Hit::Row(i) => Some(i),
+        _ => None,
+    }
+}
+
+/// What the window shows now: only the rows in the viewport are built.
+fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
+    let clips = s.machine.clips();
+    let visible = layout.visible_rows(s.scroll);
+    let first = visible.start;
+    let rows = clips[visible]
+        .iter()
+        .map(|c| draw::RowView { title: text::one_line(&c.text), sub: text::type_line(&c.text, now, c.last_copied_ms) })
+        .collect();
+    draw::View {
+        layout,
+        rows,
+        first,
+        selected: (!clips.is_empty()).then(|| s.machine.selected()),
+        hover: s.hover,
+        scroll: s.scroll,
+        query: String::new(),
+        count: text::count_label(clips.len()),
+    }
+}
+
+/// The pointer moved over the window: highlight the row under it.
+pub(crate) fn on_mouse_move(x: i32, y: i32) {
+    let changed = with(|s| {
+        let hover = match s.layout().hit(x, y, s.scroll) {
+            Hit::Row(i) => Some(i),
+            _ => None,
+        };
+        let changed = s.machine.is_open() && hover != s.hover;
+        if changed {
+            s.hover = hover;
+        }
+        changed
+    });
+    if changed == Some(true) {
+        redraw();
+    }
+}
+
+/// The pointer left the window: no hover.
+pub(crate) fn on_mouse_leave() {
+    if with(|s| s.hover.take().is_some() && s.machine.is_open()) == Some(true) {
+        redraw();
+    }
+}
+
+/// The wheel turned over the window (`delta` in 1/120 notches, client x, y).
+pub(crate) fn on_wheel(delta: i32, x: i32, y: i32) {
+    let changed = with(|s| {
+        let layout = s.layout();
+        let scroll = layout.wheel(s.scroll, delta);
+        let hover = match layout.hit(x, y, scroll) {
+            Hit::Row(i) => Some(i),
+            _ => None,
+        };
+        let changed = s.machine.is_open() && (scroll != s.scroll || hover != s.hover);
+        if changed {
+            s.scroll = scroll;
+            s.hover = hover;
+        }
+        changed
+    });
+    if changed == Some(true) {
+        redraw();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_paste_target_is_the_foreground_app_never_one_of_ours() {
+        assert_eq!(paste_target(0x500, 0x100, 0x200), Some(Target(0x500)));
+        assert_eq!(paste_target(0, 0x100, 0x200), None);
+        assert_eq!(paste_target(0x100, 0x100, 0x200), None);
+        // The tray menu leaves the resident in the foreground.
+        assert_eq!(paste_target(0x200, 0x100, 0x200), None);
+    }
+
+    #[test]
+    fn a_switch_reports_only_a_real_change() {
+        let mut on = true;
+        assert!(!switch(&mut on, true));
+        assert!(switch(&mut on, false));
+        assert!(!switch(&mut on, false));
+        assert!(switch(&mut on, true));
+        assert!(on);
+    }
+
+    #[test]
+    fn hover_follows_the_row_under_a_still_pointer() {
+        let l = Layout::new(1.0, 20, 0, false);
+        let origin = (1000, 200);
+        // Pointer over the list's first row (after the 21 DIP label), then the same
+        // pointer after the list scrolled by two rows.
+        let pointer = (origin.0 + 200, origin.1 + l.list_top() as i32 + 30);
+        assert_eq!(hover_at(&l, pointer, origin, 0.0), Some(0));
+        assert_eq!(hover_at(&l, pointer, origin, 2.0 * 44.0), Some(2));
+        // Outside the window: none.
+        assert_eq!(hover_at(&l, (5, 5), origin, 0.0), None);
+    }
 }
