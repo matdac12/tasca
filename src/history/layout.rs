@@ -16,10 +16,10 @@ pub const ROW_H: f32 = 44.0;
 pub const ROW_RADIUS: f32 = 7.0;
 /// Side padding inside a row, a label, the search line and the footer.
 pub const SIDE: f32 = 10.0;
-/// A section label ("Pinned" / "Recent"): 7 above, 3 below its 11 DIP line.
-pub const LABEL_H: f32 = 21.0;
+/// A section label ("Pinned" / "Recent"): 7 above its 11 DIP line, 8 below it, so the first row does not crowd it.
+pub const LABEL_H: f32 = 26.0;
 /// The list stops growing at nine rows plus the two labels.
-pub const LIST_MAX_H: f32 = 438.0;
+pub const LIST_MAX_H: f32 = 448.0;
 pub const FOOT_H: f32 = 28.0;
 /// "No Clip matches": 18 DIP above and below one 16 DIP line.
 pub const EMPTY_H: f32 = 52.0;
@@ -241,19 +241,19 @@ mod tests {
     fn the_panel_grows_with_its_clips_up_to_nine_rows() {
         // No Clips: the empty-state block. Three: the "Recent" label and 3 rows.
         assert!(close(layout(0).panel_h(), chrome(1.0) + 52.0));
-        assert!(close(layout(3).panel_h(), chrome(1.0) + 21.0 + 3.0 * 44.0));
-        assert!(close(layout(9).panel_h(), chrome(1.0) + 21.0 + 9.0 * 44.0));
-        // Twenty: the list stops at 438 DIP and scrolls.
-        assert!(close(layout(20).panel_h(), chrome(1.0) + 438.0));
-        assert_eq!(layout(20).list_h(), 438.0);
-        assert_eq!(layout(10).list_h(), 438.0);
+        assert!(close(layout(3).panel_h(), chrome(1.0) + 26.0 + 3.0 * 44.0));
+        assert!(close(layout(9).panel_h(), chrome(1.0) + 26.0 + 9.0 * 44.0));
+        // Twenty: the list stops at 448 DIP and scrolls.
+        assert!(close(layout(20).panel_h(), chrome(1.0) + 448.0));
+        assert_eq!(layout(20).list_h(), 448.0);
+        assert_eq!(layout(10).list_h(), 448.0);
         assert_eq!(layout(21).panel_h(), layout(20).panel_h());
     }
 
     #[test]
     fn the_panel_height_holds_at_every_scale() {
         for scale in [1.0, 1.5, 2.0] {
-            for (rows, list) in [(0, 52.0), (3, 21.0 + 132.0), (9, 21.0 + 396.0), (20, 438.0)] {
+            for (rows, list) in [(0, 52.0), (3, 26.0 + 132.0), (9, 26.0 + 396.0), (20, 448.0)] {
                 let l = Layout::new(scale, rows, 0, false);
                 assert!(close(l.panel_h(), chrome(scale) + list), "scale {scale} rows {rows}");
             }
@@ -263,10 +263,10 @@ mod tests {
     #[test]
     fn pins_add_their_own_label() {
         let l = Layout::new(1.0, 5, 2, false);
-        assert_eq!(l.content_h(), 2.0 * 21.0 + 5.0 * 44.0);
-        assert_eq!(l.labels(), vec![(0.0, true), (21.0 + 2.0 * 44.0, false)]);
-        assert_eq!(l.row_top(0), 21.0);
-        assert_eq!(l.row_top(2), 21.0 + 2.0 * 44.0 + 21.0);
+        assert_eq!(l.content_h(), 2.0 * 26.0 + 5.0 * 44.0);
+        assert_eq!(l.labels(), vec![(0.0, true), (26.0 + 2.0 * 44.0, false)]);
+        assert_eq!(l.row_top(0), 26.0);
+        assert_eq!(l.row_top(2), 26.0 + 2.0 * 44.0 + 26.0);
         // All pinned: no "Recent" label. Searching: no labels at all.
         assert_eq!(Layout::new(1.0, 2, 2, false).labels(), vec![(0.0, true)]);
         let s = Layout::new(1.0, 5, 2, true);
@@ -285,7 +285,7 @@ mod tests {
             // Hairlines stay one physical pixel.
             assert!(close(l.hair() * scale, 1.0));
         }
-        assert_eq!(layout(3).size_px(), (424, 271));
+        assert_eq!(layout(3).size_px(), (424, 276));
         assert_eq!(Layout::new(1.5, 3, 0, false).panel_offset_px(), (12, 15));
     }
 
@@ -315,9 +315,9 @@ mod tests {
         let at = |x: f32, y: f32| l.hit(x as i32, y as i32, 0.0);
         assert_eq!(at(2.0, 2.0), Hit::Margin);
         assert_eq!(at(200.0, 30.0), Hit::Search);
-        // The "Recent" label is the first 21 DIP of the list.
+        // The "Recent" label is the first 26 DIP of the list.
         assert_eq!(at(200.0, l.list_top() + 5.0), Hit::Panel);
-        assert_eq!(at(200.0, l.list_top() + 22.0), Hit::Row(0));
+        assert_eq!(at(200.0, l.list_top() + 30.0), Hit::Row(0));
         // Row padding at the sides.
         assert_eq!(at(MARGIN_L + 2.0, l.list_top() + 30.0), Hit::Panel);
         assert_eq!(at(MARGIN_L + 30.0, l.footer_top() + 14.0), Hit::Clear);
@@ -331,7 +331,7 @@ mod tests {
         let y = (l.list_top() + 10.0) as i32;
         assert_eq!(l.hit(200, y, 0.0), Hit::Panel); // the label
         // Scrolled past the label and two rows, the top of the list is row 2.
-        let scroll = 21.0 + 2.0 * 44.0;
+        let scroll = 26.0 + 2.0 * 44.0;
         assert_eq!(l.hit(200, y, scroll), Hit::Row(2));
         // The last row at the bottom of a fully scrolled list.
         let bottom = (l.list_top() + l.list_h() - 5.0) as i32;
@@ -341,10 +341,10 @@ mod tests {
     #[test]
     fn only_the_rows_in_the_viewport_are_visible() {
         let l = layout(100);
-        // Top: label + rows 0..=8 fill 417, row 9 starts at 417 < 438.
+        // Top: label + rows 0..=8 fill 422, row 9 starts at 422 < 448.
         assert_eq!(l.visible_rows(0.0), 0..10);
-        // Scrolled to row 50's top: it is first; the viewport reaches row 59.
-        assert_eq!(l.visible_rows(l.row_top(50)), 50..60);
+        // Scrolled to row 50's top: it is first; the viewport reaches row 60.
+        assert_eq!(l.visible_rows(l.row_top(50)), 50..61);
         // A partly hidden first row still counts.
         assert_eq!(l.visible_rows(l.row_top(50) + 10.0).start, 50);
         // Past the end clamps; short and empty lists.
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn the_wheel_moves_a_row_per_notch_and_stops_at_the_ends() {
         let l = layout(20);
-        assert_eq!(l.max_scroll(), 21.0 + 20.0 * 44.0 - 438.0);
+        assert_eq!(l.max_scroll(), 26.0 + 20.0 * 44.0 - 448.0);
         assert_eq!(l.wheel(0.0, 120), 0.0);
         assert_eq!(l.wheel(0.0, -120), 44.0);
         assert_eq!(l.wheel(44.0, -60), 66.0);
@@ -370,12 +370,12 @@ mod tests {
     fn the_selection_is_kept_in_view() {
         let l = layout(20);
         assert_eq!(l.scroll_to_show(0.0, 0), 0.0);
-        // Row 8 ends at 21 + 9 * 44 = 417, inside 438: nothing moves.
+        // Row 8 ends at 26 + 9 * 44 = 422, inside 448: nothing moves.
         assert_eq!(l.scroll_to_show(0.0, 8), 0.0);
-        // Row 9 ends at 461: scroll so its bottom meets the list's.
-        assert_eq!(l.scroll_to_show(0.0, 9), 461.0 - 438.0);
-        // Going back up: row 1 starts at 21 + 44 = 65.
-        assert_eq!(l.scroll_to_show(200.0, 1), 65.0);
+        // Row 9 ends at 466: scroll so its bottom meets the list's.
+        assert_eq!(l.scroll_to_show(0.0, 9), 466.0 - 448.0);
+        // Going back up: row 1 starts at 26 + 44 = 70.
+        assert_eq!(l.scroll_to_show(200.0, 1), 70.0);
         // Back to the first row shows the label too.
         assert_eq!(l.scroll_to_show(200.0, 0), 0.0);
         // The last row.

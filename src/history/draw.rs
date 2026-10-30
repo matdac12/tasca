@@ -76,6 +76,8 @@ struct Fonts {
     foot: IDWriteTextFormat,
     foot_r: IDWriteTextFormat,
     empty: IDWriteTextFormat,
+    /// To measure the search text (the caret sits after it).
+    dw: IDWriteFactory,
 }
 
 pub struct Renderer {
@@ -144,6 +146,7 @@ impl Renderer {
                 foot: text_format(&dw, &fam, 11.0, n, lead, true)?,
                 foot_r: text_format(&dw, &fam, 11.0, n, trail, true)?,
                 empty: text_format(&dw, &fam, 12.0, n, DWRITE_TEXT_ALIGNMENT_CENTER, true)?,
+                dw: dw.clone(),
             };
             Ok(Self { d2d, rt: None, fonts, surf: None })
         }
@@ -243,11 +246,19 @@ unsafe fn draw(rt: &ID2D1DCRenderTarget, fonts: &Fonts, v: &View) -> Result<()> 
         rt.DrawLine(Vector2 { X: cx + 3.7, Y: cy + 3.7 }, Vector2 { X: cx + 7.0, Y: cy + 7.0 }, &lens, 1.3, None);
         let tx = s.left + SIDE + LENS_W + LENS_GAP;
         let line = rect(tx, s.top, s.right - SIDE, s.bottom);
+        let mut caret_x = tx;
         if v.query.is_empty() {
             text("Type to search", &fonts.search, line, &lens);
         } else {
             text(&v.query, &fonts.search, line, &white(T1)?);
+            let q = wide(&v.query);
+            let layout = fonts.dw.CreateTextLayout(&q, &fonts.search, 4096.0, 40.0)?;
+            let mut m = Default::default();
+            layout.GetMetrics(&mut m)?;
+            caret_x = (tx + m.widthIncludingTrailingWhitespace).min(line.right - 1.0);
         }
+        // The caret stays at the end of the text.
+        rt.FillRectangle(&rect(caret_x, mid - 8.0, caret_x + 1.0, mid + 8.0), &white(T1)?);
         let rule = white(RULE_A)?;
         rt.FillRectangle(&rect(s.left, s.bottom, s.right, s.bottom + hair), &rule);
 
