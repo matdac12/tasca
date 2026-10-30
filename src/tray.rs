@@ -15,14 +15,14 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, GetCursorPos, GetSystemMetrics,
     LoadImageW, PostMessageW, SetForegroundWindow, TrackPopupMenu, HICON, IMAGE_ICON, LR_SHARED,
-    MF_SEPARATOR, MF_STRING, SM_CXICON, SM_CXSMICON, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    MF_GRAYED, MF_SEPARATOR, MF_STRING, SM_CXICON, SM_CXSMICON, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     WM_CONTEXTMENU, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 
-use crate::hotkey::Hotkey;
+use crate::hotkey::{self, Hotkey, Slot};
 use crate::log::log;
-use crate::proto::WM_TRAY;
-use crate::{settings_win, shelf};
+use crate::proto::{WM_SHOW_HISTORY, WM_TRAY};
+use crate::{settings, settings_win, shelf};
 
 /// Resource id of the icon in `tasca.rc`.
 const ICON_ID: u16 = 1;
@@ -31,6 +31,7 @@ const TRAY_ID: u32 = 1;
 const ID_SHOW: usize = 1;
 const ID_SETTINGS: usize = 2;
 const ID_QUIT: usize = 3;
+const ID_HISTORY: usize = 4;
 
 /// `NIN_SELECT` (NOTIFYICON_VERSION_4); harmless in classic mode.
 const NIN_SELECT: u32 = 1024;
@@ -170,22 +171,41 @@ pub fn remove() {
 
 /// Refresh the tooltip from the current shortcut state.
 pub fn refresh() {
-    let (shortcut, error) = crate::hotkey::display(crate::hotkey::Slot::Shelf);
-    let notice = notice();
-    update_tip(&tip(shortcut, error.as_deref(), notice.as_deref()));
+    update_tip(&current_tip());
 }
 
-/// Tooltip text: `Tasca (Ctrl+Alt+D)`, plus the reason when registration
-/// failed, plus a failed settings apply.
-pub fn tip(shortcut: Option<Hotkey>, error: Option<&str>, notice: Option<&str>) -> String {
-    let base = match (shortcut, error) {
-        (Some(hk), None) => format!("Tasca ({})", hk.text()),
-        (Some(hk), Some(_)) => format!("Tasca ({}, unavailable)", hk.text()),
-        (None, _) => "Tasca (no shortcut)".to_string(),
+/// The tooltip for the shortcuts and settings as they are now.
+pub fn current_tip() -> String {
+    let (shortcut, error) = hotkey::display(Slot::Shelf);
+    let history = settings::current().history.then(|| hotkey::display(Slot::History));
+    tip(
+        (shortcut, error.as_deref()),
+        history.as_ref().map(|(hk, e)| (*hk, e.as_deref())),
+        notice().as_deref(),
+    )
+}
+
+/// Tooltip text: `Tasca (Ctrl+Alt+D) | History (Alt+V)`; a shortcut that
+/// failed to register says `unavailable`; the History part is left out while
+/// the History is off (`history` is `None`); a failed settings apply follows.
+pub fn tip(
+    shelf: (Option<Hotkey>, Option<&str>),
+    history: Option<(Option<Hotkey>, Option<&str>)>,
+    notice: Option<&str>,
+) -> String {
+    let part = |name: &str, (shortcut, error): (Option<Hotkey>, Option<&str>)| match (shortcut, error) {
+        (Some(hk), None) => format!("{name} ({})", hk.text()),
+        (Some(hk), Some(_)) => format!("{name} ({}, unavailable)", hk.text()),
+        (None, _) => format!("{name} (no shortcut)"),
     };
+    let mut text = part("Tasca", shelf);
+    if let Some(history) = history {
+        text.push_str(" | ");
+        text.push_str(&part("History", history));
+    }
     match notice {
-        Some(n) => format!("{base} - {n}"),
-        None => base,
+        Some(n) => format!("{text} - {n}"),
+        None => text,
     }
 }
 
@@ -211,6 +231,8 @@ fn menu(hwnd: HWND) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let _ = AppendMenuW(menu, MF_STRING, ID_SHOW, w!("Show shelf"));
+        let history_flags = if settings::current().history { MF_STRING } else { MF_STRING | MF_GRAYED };
+        let _ = AppendMenuW(menu, history_flags, ID_HISTORY, w!("Show clipboard history"));
         let _ = AppendMenuW(menu, MF_STRING, ID_SETTINGS, w!("Settings\u{2026}"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
         let _ = AppendMenuW(menu, MF_STRING, ID_QUIT, w!("Quit"));
@@ -236,6 +258,12 @@ fn menu(hwnd: HWND) {
                 log("tray: show shelf");
                 shelf::show();
             }
+            ID_HISTORY => {
+                log("tray: show clipboard history");
+                // Posted, not called: the menu's foreground juggling is over
+                // by the time the History reads the foreground window.
+                let _ = PostMessageW(Some(hwnd), WM_SHOW_HISTORY, WPARAM(0), LPARAM(0));
+            }
             ID_SETTINGS => {
                 log("tray: settings");
                 settings_win::open(hwnd);
@@ -256,16 +284,38 @@ mod tests {
     #[test]
     fn tooltip_shows_the_shortcut_and_failures() {
         let hk = Hotkey::DEFAULT;
-        assert_eq!(tip(Some(hk), None, None), "Tasca (Ctrl+Alt+D)");
+        assert_eq!(tip((Some(hk), None), None, None), "Tasca (Ctrl+Alt+D)");
         assert_eq!(
-            tip(Some(hk), Some("taken"), None),
+            tip((Some(hk), Some("taken")), None, None),
             "Tasca (Ctrl+Alt+D, unavailable)"
         );
-        assert_eq!(tip(None, None, None), "Tasca (no shortcut)");
-        assert_eq!(tip(None, Some("taken"), None), "Tasca (no shortcut)");
+        assert_eq!(tip((None, None), None, None), "Tasca (no shortcut)");
+        assert_eq!(tip((None, Some("taken")), None, None), "Tasca (no shortcut)");
         assert_eq!(
-            tip(Some(hk), None, Some("settings not saved")),
+            tip((Some(hk), None), None, Some("settings not saved")),
             "Tasca (Ctrl+Alt+D) - settings not saved"
+        );
+    }
+
+    #[test]
+    fn tooltip_lists_both_shortcuts() {
+        let shelf = (Some(Hotkey::DEFAULT), None);
+        let alt_v = Hotkey::HISTORY_DEFAULT;
+        assert_eq!(
+            tip(shelf, Some((Some(alt_v), None)), None),
+            "Tasca (Ctrl+Alt+D) | History (Alt+V)"
+        );
+        assert_eq!(
+            tip(shelf, Some((Some(alt_v), Some("taken"))), None),
+            "Tasca (Ctrl+Alt+D) | History (Alt+V, unavailable)"
+        );
+        assert_eq!(
+            tip(shelf, Some((None, None)), None),
+            "Tasca (Ctrl+Alt+D) | History (no shortcut)"
+        );
+        assert_eq!(
+            tip((Some(Hotkey::DEFAULT), Some("taken")), Some((Some(alt_v), None)), Some("settings not saved")),
+            "Tasca (Ctrl+Alt+D, unavailable) | History (Alt+V) - settings not saved"
         );
     }
 

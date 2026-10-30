@@ -3,23 +3,51 @@
 //! here can crash the resident.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use crate::hotkey::Hotkey;
 
-/// Only the shortcut lives in the file today. "Start with Windows" is derived
+/// The shortcuts and the History switches. "Start with Windows" is derived
 /// from the Startup shortcut itself, not stored.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Settings {
     /// `None` = the user cleared it ("None"), so Hyperkey users are unaffected.
     pub shortcut: Option<Hotkey>,
+    /// The clipboard History records and opens.
+    pub history: bool,
+    /// The History's shortcut; kept in the file while `history` is off.
+    pub history_shortcut: Option<Hotkey>,
+    /// Leave out copies that password managers mark as private.
+    pub skip_private: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             shortcut: Some(Hotkey::DEFAULT),
+            history: true,
+            history_shortcut: Some(Hotkey::HISTORY_DEFAULT),
+            skip_private: true,
         }
     }
+}
+
+/// What the resident is running with now: set at startup and on every
+/// applied Settings OK. Read by the tray, the Settings window and the
+/// clipboard reader thread, so it is a mutex, not a `RefCell`.
+static CURRENT: Mutex<Settings> = Mutex::new(Settings {
+    shortcut: Some(Hotkey::DEFAULT),
+    history: true,
+    history_shortcut: Some(Hotkey::HISTORY_DEFAULT),
+    skip_private: true,
+});
+
+pub fn current() -> Settings {
+    *CURRENT.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+pub fn set_current(settings: Settings) {
+    *CURRENT.lock().unwrap_or_else(|p| p.into_inner()) = settings;
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -67,23 +95,44 @@ pub fn parse(text: &str) -> Settings {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if !key.trim().eq_ignore_ascii_case("shortcut") {
-            continue;
+        let (key, value) = (key.trim(), value.trim());
+        if key.eq_ignore_ascii_case("shortcut") {
+            out.shortcut = shortcut_value(value, Hotkey::DEFAULT);
+        } else if key.eq_ignore_ascii_case("history_shortcut") {
+            out.history_shortcut = shortcut_value(value, Hotkey::HISTORY_DEFAULT);
+        } else if key.eq_ignore_ascii_case("history") {
+            out.history = switch_value(value).unwrap_or(true);
+        } else if key.eq_ignore_ascii_case("skip_private") {
+            out.skip_private = switch_value(value).unwrap_or(true);
         }
-        let value = value.trim();
-        out.shortcut = if value.is_empty() || value.eq_ignore_ascii_case("none") {
-            None
-        } else {
-            // A shortcut we cannot read, or one that is not safe to grab
-            // globally (hand-edited file), is the "garbled file" case.
-            Some(
-                Hotkey::parse(value)
-                    .filter(Hotkey::is_safe)
-                    .unwrap_or(Hotkey::DEFAULT),
-            )
-        };
     }
     out
+}
+
+/// A shortcut value. A shortcut we cannot read, or one that is not safe to
+/// grab globally (hand-edited file), is the "garbled file" case: `default`.
+/// An explicit `None` or an empty value means no shortcut.
+fn shortcut_value(value: &str, default: Hotkey) -> Option<Hotkey> {
+    if value.is_empty() || value.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(
+        Hotkey::parse(value)
+            .filter(Hotkey::is_safe)
+            .unwrap_or(default),
+    )
+}
+
+/// An on/off value; `None` when it is neither.
+fn switch_value(value: &str) -> Option<bool> {
+    let is = |names: &[&str]| names.iter().any(|n| value.eq_ignore_ascii_case(n));
+    if is(&["on", "true", "yes", "1"]) {
+        Some(true)
+    } else if is(&["off", "false", "no", "0"]) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// The tray-tooltip notice for a failed background apply, `None` when both
@@ -97,13 +146,28 @@ pub fn failure_notice(start: Option<&str>, save: Option<&str>) -> Option<String>
     }
 }
 
-pub fn render(settings: &Settings) -> String {
-    let shortcut = match settings.shortcut {
+fn shortcut_text(shortcut: Option<Hotkey>) -> String {
+    match shortcut {
         Some(hk) => hk.text(),
         None => "None".to_string(),
-    };
+    }
+}
+
+fn switch_text(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+pub fn render(settings: &Settings) -> String {
     format!(
-        "# Tasca settings (hand-edited: the app rewrites this file on OK)\nshortcut={shortcut}\n"
+        "# Tasca settings (hand-edited: the app rewrites this file on OK)\nshortcut={}\nhistory={}\nhistory_shortcut={}\nskip_private={}\n",
+        shortcut_text(settings.shortcut),
+        switch_text(settings.history),
+        shortcut_text(settings.history_shortcut),
+        switch_text(settings.skip_private),
     )
 }
 
@@ -125,12 +189,23 @@ mod tests {
     fn round_trips() {
         for settings in [
             Settings::default(),
-            Settings { shortcut: None },
+            Settings {
+                shortcut: None,
+                ..Settings::default()
+            },
             Settings {
                 shortcut: Hotkey::parse("Ctrl+Shift+F13"),
+                ..Settings::default()
             },
             Settings {
                 shortcut: Hotkey::parse("Win+Alt+Num3"),
+                history: false,
+                history_shortcut: None,
+                skip_private: false,
+            },
+            Settings {
+                history_shortcut: Hotkey::parse("Ctrl+Alt+H"),
+                ..Settings::default()
             },
         ] {
             assert_eq!(parse(&render(&settings)), settings);
@@ -139,9 +214,9 @@ mod tests {
 
     #[test]
     fn garbled_values_fall_back_to_the_default() {
-        assert_eq!(parse("shortcut=\n"), Settings { shortcut: None });
-        assert_eq!(parse("shortcut=None\n"), Settings { shortcut: None });
-        assert_eq!(parse("shortcut=none\n"), Settings { shortcut: None });
+        assert_eq!(parse("shortcut=\n").shortcut, None);
+        assert_eq!(parse("shortcut=None\n").shortcut, None);
+        assert_eq!(parse("shortcut=none\n").shortcut, None);
         assert_eq!(parse("shortcut=Hyper+Q\n"), Settings::default());
         assert_eq!(parse("shortcut=Ctrl+\n"), Settings::default());
         assert_eq!(parse("shortcut=\u{0}\u{1}\n"), Settings::default());
@@ -166,9 +241,50 @@ mod tests {
         assert_eq!(
             s,
             Settings {
-                shortcut: Hotkey::parse("Ctrl+Alt+E")
+                shortcut: Hotkey::parse("Ctrl+Alt+E"),
+                ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn the_history_keys_default_to_on_alt_v_and_skipping() {
+        let d = Settings::default();
+        assert!(d.history && d.skip_private);
+        assert_eq!(d.history_shortcut, Hotkey::parse("Alt+V"));
+        let s = parse("shortcut=Ctrl+Alt+E\n");
+        assert_eq!((s.history, s.history_shortcut, s.skip_private), (d.history, d.history_shortcut, d.skip_private));
+    }
+
+    #[test]
+    fn the_history_keys_parse() {
+        let s = parse("history=off\nhistory_shortcut=Ctrl+Alt+H\nskip_private=no\n");
+        assert!(!s.history && !s.skip_private);
+        assert_eq!(s.history_shortcut, Hotkey::parse("Ctrl+Alt+H"));
+        let s = parse("HISTORY = ON\nskip_private=1\nhistory_shortcut=none\n");
+        assert!(s.history && s.skip_private);
+        assert_eq!(s.history_shortcut, None);
+        assert_eq!(parse("history_shortcut=\n").history_shortcut, None);
+    }
+
+    #[test]
+    fn garbled_history_values_fall_back_to_the_defaults() {
+        for text in [
+            "history=maybe\n",
+            "history=\n",
+            "history=\u{0}\n",
+            "skip_private=2\n",
+            "skip_private=\n",
+            "history_shortcut=Hyper+Q\n",
+            "history_shortcut=V\n",
+            "history_shortcut=Ctrl+C\n",
+            "history_shortcut=Alt+Tab\n",
+        ] {
+            assert_eq!(parse(text), Settings::default(), "{text:?}");
+        }
+        // A garbled value does not undo an earlier good one's neighbours.
+        let s = parse("history=off\nskip_private=maybe\n");
+        assert!(!s.history && s.skip_private);
     }
 
     #[test]

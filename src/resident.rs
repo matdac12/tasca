@@ -1,7 +1,10 @@
 //! The resident: mutex, the hidden `Tasca.Shelf` window, wndproc dispatch and
 //! the message loop. The Shelf (`crate::shelf`) sees every message first.
 
+use std::cell::Cell;
+
 use windows::core::{w, Result};
+use windows::Win32::System::DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
 };
@@ -15,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::{log, now_ms, truncate};
 use crate::proto::{
-    CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SETTINGS_SAVED, WM_SHOW, WM_TOGGLE,
+    CLASS, MUTEX, WM_PARK_DONE, WM_QUIT_RESIDENT, WM_SETTINGS_SAVED, WM_SHOW, WM_SHOW_HISTORY, WM_TOGGLE,
 };
 use crate::{history, hotkey, park, settings, settings_win, shelf, tray};
 
@@ -31,10 +34,96 @@ fn on_show(_hwnd: HWND) {
     shelf::show();
 }
 
+/// Where the History stands. The window is made once (its class is never
+/// unregistered), and switching the History off only removes the clipboard
+/// listener and the shortcut, so it can come back without a restart.
+#[derive(Clone, Copy, Default)]
+struct HistoryState {
+    created: bool,
+    listening: bool,
+}
+
+thread_local! {
+    static HISTORY: Cell<HistoryState> = const { Cell::new(HistoryState { created: false, listening: false }) };
+}
+
+fn set_listener(hwnd: HWND, on: bool) -> bool {
+    let result = unsafe {
+        if on {
+            AddClipboardFormatListener(hwnd)
+        } else {
+            RemoveClipboardFormatListener(hwnd)
+        }
+    };
+    match result {
+        Ok(()) => {
+            log(format!("history: clipboard listener {}", if on { "on" } else { "off" }));
+            true
+        }
+        Err(e) => {
+            log(format!("history: clipboard listener {} failed: {e:?}", if on { "on" } else { "off" }));
+            false
+        }
+    }
+}
+
+/// Resident startup with the History on.
+fn start_history(hwnd: HWND, shortcut: Option<hotkey::Hotkey>) {
+    match history::create(hwnd) {
+        Ok(()) => {
+            HISTORY.set(HistoryState { created: true, listening: true });
+            let fallback = hotkey::Hotkey::HISTORY_DEFAULT;
+            let _ = hotkey::start(hwnd, hotkey::Slot::History, shortcut, Some(fallback));
+        }
+        Err(e) => log(format!("history failed to start, no History shortcut: {e:?}")),
+    }
+}
+
+/// Settings OK: switch the History on or off and give it `shortcut`. Off
+/// removes the clipboard listener and frees the shortcut; the saved History
+/// stays on disk. On, a refused or taken shortcut is the error, and the
+/// History is left as it was.
+pub fn set_history(hwnd: HWND, on: bool, shortcut: Option<hotkey::Hotkey>) -> std::result::Result<(), String> {
+    let mut state = HISTORY.get();
+    let was_listening = state.listening;
+    if on {
+        if !state.created {
+            history::create(hwnd).map_err(|e| format!("Clipboard history could not start ({e:?})"))?;
+            state = HistoryState { created: true, listening: true };
+        } else if !state.listening {
+            if !set_listener(hwnd, true) {
+                return Err("Clipboard history could not start listening".to_string());
+            }
+            state.listening = true;
+        }
+        HISTORY.set(state);
+        if let Err(e) = hotkey::change(hwnd, hotkey::Slot::History, shortcut) {
+            if !was_listening {
+                set_listener(hwnd, false);
+                state.listening = false;
+                HISTORY.set(state);
+            }
+            return Err(e);
+        }
+    } else {
+        if state.listening {
+            set_listener(hwnd, false);
+            state.listening = false;
+            HISTORY.set(state);
+        }
+        let _ = hotkey::change(hwnd, hotkey::Slot::History, None);
+    }
+    Ok(())
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         if let Some(r) = shelf::handle(hwnd, msg, wp, lp) {
             return r;
+        }
+        if msg == WM_SHOW_HISTORY && !HISTORY.get().listening {
+            log("show history ignored: the History is off");
+            return LRESULT(0);
         }
         if let Some(r) = history::handle(hwnd, msg, wp, lp) {
             return r;
@@ -146,6 +235,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
 
         // TASCA-24: settings, the global shortcut and the tray icon.
         let configured = settings::load();
+        settings::set_current(configured);
         match configured.shortcut {
             Some(hk) => log(format!("settings: shortcut {}", hk.text())),
             None => log("settings: shortcut cleared"),
@@ -156,18 +246,15 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
             configured.shortcut,
             Some(hotkey::Hotkey::DEFAULT),
         );
-        // The History: its window, the clipboard listener and Alt+V. A taken
-        // Alt+V (another clipboard manager) is logged by `hotkey::start`; the
-        // History still works through the show message.
-        match history::create(hwnd) {
-            Ok(()) => {
-                let hk = hotkey::Hotkey::HISTORY_DEFAULT;
-                let _ = hotkey::start(hwnd, hotkey::Slot::History, Some(hk), Some(hk));
-            }
-            Err(e) => log(format!("history failed to start, no History shortcut: {e:?}")),
+        // The History (when switched on): its window, the clipboard listener
+        // and its shortcut. A taken shortcut (another clipboard manager) is
+        // logged by `hotkey::start` and shown in the tray tooltip.
+        if configured.history {
+            start_history(hwnd, configured.history_shortcut);
+        } else {
+            log("settings: clipboard history off");
         }
-        let (shortcut, shortcut_error) = hotkey::display(hotkey::Slot::Shelf);
-        tray::add(hwnd, tray::tip(shortcut, shortcut_error.as_deref(), None));
+        tray::add(hwnd, tray::current_tip());
         #[cfg(debug_assertions)]
         if std::env::var_os("TASCA_DEV_SETTINGS").is_some() {
             settings_win::open(hwnd);
