@@ -93,9 +93,11 @@ impl Machine {
         self.open
     }
 
-    pub fn step(&mut self, event: Event) -> Vec<Effect> {
+    /// `now_ms` is the shell's clock (ms since the Unix epoch); the machine
+    /// only stamps Clips with it.
+    pub fn step(&mut self, event: Event, now_ms: u64) -> Vec<Effect> {
         match event {
-            Event::Copied(capture) => self.copied(capture),
+            Event::Copied(capture) => self.copied(capture, now_ms),
             Event::OwnWrite(seq) => {
                 self.own_seq = Some(seq);
                 Vec::new()
@@ -106,13 +108,13 @@ impl Machine {
                 self.selected = 0;
                 vec![Effect::Redraw]
             }
-            Event::Key(key) if self.open => self.key(key),
+            Event::Key(key) if self.open => self.key(key, now_ms),
             Event::Key(_) => Vec::new(),
             Event::Deactivated => self.close(),
         }
     }
 
-    fn copied(&mut self, capture: Capture) -> Vec<Effect> {
+    fn copied(&mut self, capture: Capture, now_ms: u64) -> Vec<Effect> {
         if self.last_seq == Some(capture.seq) {
             return vec![Effect::Skip(Skip::SameUpdate)];
         }
@@ -131,14 +133,15 @@ impl Machine {
         let selected_id = self.clips.get(self.selected).map(|c| c.id);
         match self.clips.iter().position(|c| c.text == text) {
             Some(i) => {
-                let clip = self.clips.remove(i);
+                let mut clip = self.clips.remove(i);
+                clip.last_copied_ms = now_ms;
                 effects.push(Effect::MoveToTop(clip.id));
                 self.clips.insert(0, clip);
             }
             None => {
                 let id = ClipId(self.next_id);
                 self.next_id += 1;
-                self.clips.insert(0, Clip { id, text });
+                self.clips.insert(0, Clip { id, text, last_copied_ms: now_ms });
                 effects.push(Effect::Add(id));
             }
         }
@@ -152,7 +155,7 @@ impl Machine {
         effects
     }
 
-    fn key(&mut self, key: Key) -> Vec<Effect> {
+    fn key(&mut self, key: Key, now_ms: u64) -> Vec<Effect> {
         match key {
             Key::Up | Key::Down => {
                 let last = self.clips.len().saturating_sub(1);
@@ -166,18 +169,19 @@ impl Machine {
                 self.selected = to;
                 vec![Effect::Redraw]
             }
-            Key::Enter => self.paste(),
+            Key::Enter => self.paste(now_ms),
             Key::Esc => self.close(),
         }
     }
 
     /// Enter: the selected Clip moves to the top and is pasted. Closing comes
     /// before the paste so the window is gone when focus goes back.
-    fn paste(&mut self) -> Vec<Effect> {
+    fn paste(&mut self, now_ms: u64) -> Vec<Effect> {
         if self.selected >= self.clips.len() {
             return self.close();
         }
-        let clip = self.clips.remove(self.selected);
+        let mut clip = self.clips.remove(self.selected);
+        clip.last_copied_ms = now_ms;
         self.clips.insert(0, clip.clone());
         let mut effects = vec![Effect::MoveToTop(clip.id)];
         effects.extend(self.close());
@@ -203,6 +207,13 @@ impl Machine {
 mod tests {
     use super::*;
 
+    /// `step` at a fixed time, for the tests that do not care about it.
+    impl Machine {
+        fn go(&mut self, event: Event) -> Vec<Effect> {
+            self.step(event, 1_000)
+        }
+    }
+
     fn copy(seq: u32, text: &str) -> Event {
         Event::Copied(Capture { seq, text: Some(text.to_string()), own: false })
     }
@@ -214,7 +225,7 @@ mod tests {
     fn with(items: &[&str]) -> Machine {
         let mut m = Machine::default();
         for (i, t) in items.iter().enumerate() {
-            m.step(copy(i as u32 + 1, t));
+            m.go(copy(i as u32 + 1, t));
         }
         m
     }
@@ -224,9 +235,9 @@ mod tests {
     #[test]
     fn a_text_clip_is_added_on_top() {
         let mut m = Machine::default();
-        let fx = m.step(copy(1, "one"));
+        let fx = m.go(copy(1, "one"));
         assert!(matches!(fx.as_slice(), [Effect::Add(_)]));
-        m.step(copy(2, "two"));
+        m.go(copy(2, "two"));
         assert_eq!(texts(&m), ["two", "one"]);
     }
 
@@ -234,7 +245,7 @@ mod tests {
     fn a_duplicate_moves_to_the_top_instead_of_being_added() {
         let mut m = with(&["a", "b", "c"]);
         let id = m.clips()[2].id;
-        let fx = m.step(copy(9, "a"));
+        let fx = m.go(copy(9, "a"));
         assert_eq!(fx, [Effect::MoveToTop(id)]);
         assert_eq!(texts(&m), ["a", "c", "b"]);
     }
@@ -242,48 +253,48 @@ mod tests {
     #[test]
     fn our_own_write_is_skipped() {
         let mut m = with(&["a"]);
-        m.step(Event::OwnWrite(7));
-        assert_eq!(m.step(copy(7, "b")), [Effect::Skip(Skip::OwnWrite)]);
+        m.go(Event::OwnWrite(7));
+        assert_eq!(m.go(copy(7, "b")), [Effect::Skip(Skip::OwnWrite)]);
         assert_eq!(texts(&m), ["a"]);
         // The next real copy is recorded.
-        m.step(copy(8, "b"));
+        m.go(copy(8, "b"));
         assert_eq!(texts(&m), ["b", "a"]);
     }
 
     #[test]
     fn a_copy_owned_by_the_history_window_is_skipped_whatever_its_sequence_number() {
         let mut m = with(&["a"]);
-        m.step(Event::OwnWrite(7));
+        m.go(Event::OwnWrite(7));
         // The update reports a later number than the one taken at write time.
         let ours = Capture { seq: 9, text: Some("b".into()), own: true };
-        assert_eq!(m.step(Event::Copied(ours)), [Effect::Skip(Skip::OwnWrite)]);
+        assert_eq!(m.go(Event::Copied(ours)), [Effect::Skip(Skip::OwnWrite)]);
         assert_eq!(texts(&m), ["a"]);
     }
 
     #[test]
     fn the_same_sequence_number_is_handled_once() {
         let mut m = Machine::default();
-        m.step(copy(3, "a"));
-        assert_eq!(m.step(copy(3, "a")), [Effect::Skip(Skip::SameUpdate)]);
+        m.go(copy(3, "a"));
+        assert_eq!(m.go(copy(3, "a")), [Effect::Skip(Skip::SameUpdate)]);
         assert_eq!(m.clips().len(), 1);
     }
 
     #[test]
     fn blank_missing_and_huge_text_is_not_recorded() {
         let mut m = Machine::default();
-        assert_eq!(m.step(Event::Copied(Capture { seq: 1, text: None, own: false })), [Effect::Skip(Skip::NothingRecordable)]);
-        assert_eq!(m.step(copy(2, " \r\n\t")), [Effect::Skip(Skip::NothingRecordable)]);
-        assert_eq!(m.step(copy(3, &"x".repeat(MAX_CLIP_BYTES + 1))), [Effect::Skip(Skip::TooBig)]);
+        assert_eq!(m.go(Event::Copied(Capture { seq: 1, text: None, own: false })), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.go(copy(2, " \r\n\t")), [Effect::Skip(Skip::NothingRecordable)]);
+        assert_eq!(m.go(copy(3, &"x".repeat(MAX_CLIP_BYTES + 1))), [Effect::Skip(Skip::TooBig)]);
         assert!(m.clips().is_empty());
     }
 
     #[test]
     fn the_first_row_is_selected_on_open() {
         let mut m = with(&["a", "b", "c"]);
-        m.step(Event::Opened(Some(APP)));
-        m.step(Event::Key(Key::Down));
-        m.step(Event::Key(Key::Esc));
-        m.step(Event::Opened(Some(APP)));
+        m.go(Event::Opened(Some(APP)));
+        m.go(Event::Key(Key::Down));
+        m.go(Event::Key(Key::Esc));
+        m.go(Event::Opened(Some(APP)));
         assert!(m.is_open());
         assert_eq!(m.selected(), 0);
     }
@@ -291,22 +302,22 @@ mod tests {
     #[test]
     fn up_and_down_move_the_selection_and_stop_at_the_ends() {
         let mut m = with(&["a", "b", "c"]);
-        m.step(Event::Opened(Some(APP)));
-        assert!(m.step(Event::Key(Key::Up)).is_empty());
-        assert_eq!(m.step(Event::Key(Key::Down)), [Effect::Redraw]);
-        m.step(Event::Key(Key::Down));
+        m.go(Event::Opened(Some(APP)));
+        assert!(m.go(Event::Key(Key::Up)).is_empty());
+        assert_eq!(m.go(Event::Key(Key::Down)), [Effect::Redraw]);
+        m.go(Event::Key(Key::Down));
         assert_eq!(m.selected(), 2);
-        assert!(m.step(Event::Key(Key::Down)).is_empty());
-        m.step(Event::Key(Key::Up));
+        assert!(m.go(Event::Key(Key::Down)).is_empty());
+        m.go(Event::Key(Key::Up));
         assert_eq!(m.selected(), 1);
     }
 
     #[test]
     fn enter_pastes_the_selected_clip_and_moves_it_to_the_top() {
         let mut m = with(&["a", "b", "c"]); // c, b, a
-        m.step(Event::Opened(Some(APP)));
-        m.step(Event::Key(Key::Down));
-        let fx = m.step(Event::Key(Key::Enter));
+        m.go(Event::Opened(Some(APP)));
+        m.go(Event::Key(Key::Down));
+        let fx = m.go(Event::Key(Key::Enter));
         let b = m.clips()[0].clone();
         assert_eq!(b.text, "b");
         assert_eq!(fx, [Effect::MoveToTop(b.id), Effect::Close, Effect::Paste { clip: b, target: APP }]);
@@ -317,45 +328,77 @@ mod tests {
     #[test]
     fn enter_without_a_target_only_copies() {
         let mut m = with(&["a"]);
-        m.step(Event::Opened(None));
-        let fx = m.step(Event::Key(Key::Enter));
+        m.go(Event::Opened(None));
+        let fx = m.go(Event::Key(Key::Enter));
         assert!(matches!(fx.as_slice(), [Effect::MoveToTop(_), Effect::Close, Effect::Copy { .. }]));
     }
 
     #[test]
     fn enter_on_an_empty_history_just_closes() {
         let mut m = Machine::default();
-        m.step(Event::Opened(Some(APP)));
-        assert_eq!(m.step(Event::Key(Key::Enter)), [Effect::Close]);
+        m.go(Event::Opened(Some(APP)));
+        assert_eq!(m.go(Event::Key(Key::Enter)), [Effect::Close]);
     }
 
     #[test]
     fn esc_and_deactivated_close_once() {
         let mut m = with(&["a"]);
-        m.step(Event::Opened(Some(APP)));
-        assert_eq!(m.step(Event::Key(Key::Esc)), [Effect::Close]);
+        m.go(Event::Opened(Some(APP)));
+        assert_eq!(m.go(Event::Key(Key::Esc)), [Effect::Close]);
         // Hiding the window deactivates it: nothing more to do.
-        assert!(m.step(Event::Deactivated).is_empty());
-        m.step(Event::Opened(Some(APP)));
-        assert_eq!(m.step(Event::Deactivated), [Effect::Close]);
+        assert!(m.go(Event::Deactivated).is_empty());
+        m.go(Event::Opened(Some(APP)));
+        assert_eq!(m.go(Event::Deactivated), [Effect::Close]);
         assert!(!m.is_open());
     }
 
     #[test]
     fn keys_do_nothing_while_closed() {
         let mut m = with(&["a"]);
-        assert!(m.step(Event::Key(Key::Enter)).is_empty());
-        assert!(m.step(Event::Key(Key::Down)).is_empty());
+        assert!(m.go(Event::Key(Key::Enter)).is_empty());
+        assert!(m.go(Event::Key(Key::Down)).is_empty());
     }
 
     #[test]
     fn a_copy_while_open_redraws_and_keeps_the_selection_valid() {
         let mut m = with(&["a", "b"]);
-        m.step(Event::Opened(None));
-        m.step(Event::Key(Key::Down));
-        let fx = m.step(copy(9, "c"));
+        m.go(Event::Opened(None));
+        m.go(Event::Key(Key::Down));
+        let fx = m.go(copy(9, "c"));
         assert!(fx.contains(&Effect::Redraw));
         // The list was b, a with "a" selected; the new clip went on top.
         assert_eq!(m.clips()[m.selected()].text, "a");
+    }
+
+    #[test]
+    fn a_new_clip_remembers_when_it_was_copied() {
+        let mut m = Machine::default();
+        m.step(copy(1, "a"), 5_000);
+        m.step(copy(2, "b"), 9_000);
+        assert_eq!(m.clips()[0].last_copied_ms, 9_000);
+        assert_eq!(m.clips()[1].last_copied_ms, 5_000);
+    }
+
+    #[test]
+    fn copying_a_clip_again_refreshes_its_time() {
+        let mut m = Machine::default();
+        m.step(copy(1, "a"), 5_000);
+        m.step(copy(2, "b"), 6_000);
+        m.step(copy(3, "a"), 20_000);
+        assert_eq!(texts(&m), ["a", "b"]);
+        assert_eq!((m.clips()[0].last_copied_ms, m.clips()[1].last_copied_ms), (20_000, 6_000));
+    }
+
+    #[test]
+    fn pasting_a_clip_moves_it_to_the_top_with_the_time_of_the_paste() {
+        let mut m = Machine::default();
+        m.step(copy(1, "a"), 5_000);
+        m.step(copy(2, "b"), 6_000);
+        m.step(Event::Opened(None), 30_000);
+        m.step(Event::Key(Key::Down), 31_000);
+        m.step(Event::Key(Key::Enter), 32_000);
+        assert_eq!(texts(&m), ["a", "b"]);
+        assert_eq!(m.clips()[0].last_copied_ms, 32_000);
+        assert_eq!(m.clips()[1].last_copied_ms, 6_000);
     }
 }

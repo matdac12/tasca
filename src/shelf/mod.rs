@@ -17,7 +17,7 @@ pub mod layout;
 pub mod model;
 mod open;
 pub mod probe;
-mod render;
+pub(crate) mod render;
 mod takeout;
 mod tiles;
 mod window;
