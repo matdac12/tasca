@@ -12,13 +12,14 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, ScreenToC
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
+    GetKeyState, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_MENU,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::draw::{self, View};
 use super::layout::Layout;
-use super::state::{Event, Key};
+use super::state::{Event, Key, Mods};
 use crate::log::log;
 
 const CLASS: windows::core::PCWSTR = w!("Tasca.History");
@@ -38,7 +39,12 @@ thread_local! {
     static ORIGIN: Cell<(i32, i32)> = const { Cell::new((0, 0)) };
     /// A `WM_MOUSELEAVE` is already requested.
     static TRACKING: Cell<bool> = const { Cell::new(false) };
+    /// The first half of a typed surrogate pair (characters beyond the BMP).
+    static HIGH_SURROGATE: Cell<u16> = const { Cell::new(0) };
 }
+
+/// `MK_SHIFT` in a mouse message's `wParam`.
+const MK_SHIFT: usize = 0x0004;
 
 /// Work area of a monitor, in pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -204,14 +210,43 @@ fn track_leave(hwnd: HWND) {
     }
 }
 
-fn key_of(vk: u16) -> Option<Key> {
+/// The key a virtual-key code stands for. A digit counts only with Alt or
+/// Ctrl (the number shortcuts); a bare digit is left to `WM_CHAR` and goes
+/// into the search.
+fn key_of(vk: u16, mods: Mods) -> Option<Key> {
     match vk {
         v if v == VK_UP.0 => Some(Key::Up),
         v if v == VK_DOWN.0 => Some(Key::Down),
+        v if v == VK_PRIOR.0 => Some(Key::PageUp),
+        v if v == VK_NEXT.0 => Some(Key::PageDown),
         v if v == VK_RETURN.0 => Some(Key::Enter),
         v if v == VK_ESCAPE.0 => Some(Key::Esc),
+        v if v == VK_BACK.0 => Some(Key::Backspace),
+        v @ 0x31..=0x39 if mods.alt || mods.ctrl => Some(Key::Digit((v - 0x30) as u8)),
         _ => None,
     }
+}
+
+/// Alt, Ctrl and Shift as they are right now (the state this message saw).
+fn mods_now() -> Mods {
+    let down = |vk: u16| unsafe { GetKeyState(vk as i32) } < 0;
+    Mods { alt: down(VK_MENU.0), ctrl: down(VK_CONTROL.0), shift: down(VK_SHIFT.0) }
+}
+
+/// The character a `WM_CHAR` carries; a surrogate pair arrives as two messages.
+fn char_of(unit: u16) -> Option<char> {
+    if (0xD800..0xDC00).contains(&unit) {
+        HIGH_SURROGATE.set(unit);
+        return None;
+    }
+    let high = HIGH_SURROGATE.replace(0);
+    if (0xDC00..0xE000).contains(&unit) {
+        if high == 0 {
+            return None;
+        }
+        return char::decode_utf16([high, unit]).next()?.ok();
+    }
+    char::from_u32(unit as u32)
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -251,13 +286,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             // Alt is usually still held from Alt+V, so Enter arrives as a SYSKEYDOWN.
-            WM_KEYDOWN | WM_SYSKEYDOWN => match key_of(wp.0 as u16) {
-                Some(key) => {
-                    super::dispatch(Event::Key(key));
-                    LRESULT(0)
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let mods = mods_now();
+                match key_of(wp.0 as u16, mods) {
+                    Some(key) => {
+                        super::dispatch(Event::Key(key, mods));
+                        LRESULT(0)
+                    }
+                    None => DefWindowProcW(hwnd, msg, wp, lp),
                 }
-                None => DefWindowProcW(hwnd, msg, wp, lp),
-            },
+            }
+            // Typing goes into the search (Alt-held letters arrive as WM_SYSCHAR and are ignored).
+            WM_CHAR => {
+                if let Some(c) = char_of(wp.0 as u16) {
+                    super::dispatch(Event::Char(c));
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                let (x, y) = xy(lp);
+                super::on_click(x, y, wp.0 & MK_SHIFT != 0);
+                LRESULT(0)
+            }
             // No menu bar to activate, and no beep for Alt+letter.
             WM_SYSCHAR => LRESULT(0),
             WM_SYSCOMMAND if wp.0 & 0xfff0 == SC_KEYMENU as usize => LRESULT(0),
@@ -351,12 +401,37 @@ mod tests {
         assert_eq!(fade_alpha(5_000), 255);
     }
 
+    const NONE: Mods = Mods { alt: false, ctrl: false, shift: false };
+    const ALT: Mods = Mods { alt: true, ctrl: false, shift: false };
+
     #[test]
-    fn only_the_four_keys_are_mapped() {
-        assert_eq!(key_of(VK_RETURN.0), Some(Key::Enter));
-        assert_eq!(key_of(VK_ESCAPE.0), Some(Key::Esc));
-        assert_eq!(key_of(VK_UP.0), Some(Key::Up));
-        assert_eq!(key_of(VK_DOWN.0), Some(Key::Down));
-        assert_eq!(key_of(b'A' as u16), None);
+    fn the_navigation_and_edit_keys_are_mapped() {
+        assert_eq!(key_of(VK_RETURN.0, NONE), Some(Key::Enter));
+        assert_eq!(key_of(VK_ESCAPE.0, NONE), Some(Key::Esc));
+        assert_eq!(key_of(VK_UP.0, NONE), Some(Key::Up));
+        assert_eq!(key_of(VK_DOWN.0, NONE), Some(Key::Down));
+        assert_eq!(key_of(VK_PRIOR.0, NONE), Some(Key::PageUp));
+        assert_eq!(key_of(VK_NEXT.0, NONE), Some(Key::PageDown));
+        assert_eq!(key_of(VK_BACK.0, NONE), Some(Key::Backspace));
+        assert_eq!(key_of(b'A' as u16, ALT), None);
+    }
+
+    #[test]
+    fn a_digit_is_a_number_shortcut_only_with_alt_or_ctrl() {
+        assert_eq!(key_of(b'3' as u16, ALT), Some(Key::Digit(3)));
+        assert_eq!(key_of(b'9' as u16, Mods { ctrl: true, ..NONE }), Some(Key::Digit(9)));
+        assert_eq!(key_of(b'3' as u16, NONE), None);
+        assert_eq!(key_of(b'3' as u16, Mods { shift: true, ..NONE }), None);
+        assert_eq!(key_of(b'0' as u16, ALT), None);
+    }
+
+    #[test]
+    fn typed_characters_include_pairs_beyond_the_bmp() {
+        assert_eq!(char_of('a' as u16), Some('a'));
+        assert_eq!(char_of('è' as u16), Some('è'));
+        // U+1F600 is the pair D83D DE00.
+        assert_eq!(char_of(0xD83D), None);
+        assert_eq!(char_of(0xDE00), char::from_u32(0x1F600));
+        assert_eq!(char_of(0xDE00), None);
     }
 }

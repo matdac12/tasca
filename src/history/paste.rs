@@ -44,6 +44,9 @@ struct Job {
     target: Option<Target>,
     tries: u32,
     owner: isize,
+    /// Only the plain text is written. Today a Clip is only plain text, so
+    /// this changes nothing yet; it is carried for the formatted Clips.
+    plain: bool,
 }
 
 thread_local! {
@@ -92,19 +95,19 @@ fn write(owner: HWND, clip: &Clip) -> Written {
 }
 
 /// Copy-only: the Clip is on the clipboard and nothing is typed.
-pub fn copy(resident: HWND, owner: HWND, clip: &Clip) {
-    start(resident, owner, clip, None);
+pub fn copy(resident: HWND, owner: HWND, clip: &Clip, plain: bool) {
+    start(resident, owner, clip, None, plain);
 }
 
 /// Write the Clip, then bring `target` back and schedule the keystrokes. The
 /// History window is already hidden.
-pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target) {
-    start(resident, owner, clip, Some(target));
+pub fn paste(resident: HWND, owner: HWND, clip: &Clip, target: Target, plain: bool) {
+    start(resident, owner, clip, Some(target), plain);
 }
 
-fn start(resident: HWND, owner: HWND, clip: &Clip, target: Option<Target>) {
+fn start(resident: HWND, owner: HWND, clip: &Clip, target: Option<Target>, plain: bool) {
     // A newer paste replaces one still waiting.
-    JOB.with(|j| *j.borrow_mut() = Some(Job { clip: clip.clone(), target, tries: 0, owner: owner.0 as isize }));
+    JOB.with(|j| *j.borrow_mut() = Some(Job { clip: clip.clone(), target, tries: 0, owner: owner.0 as isize, plain }));
     attempt(resident);
 }
 
@@ -120,6 +123,7 @@ fn attempt(resident: HWND) {
     let Some(job) = JOB.with(|j| j.borrow_mut().take()) else { return };
     match write(HWND(job.owner as *mut _), &job.clip) {
         Written::Done(seq) => {
+            log(format!("history: wrote a Clip (plain text only: {})", job.plain));
             super::dispatch(Event::OwnWrite(seq));
             if let Some(target) = job.target {
                 restore_and_schedule_keys(resident, target);
@@ -185,10 +189,19 @@ pub fn on_keys(resident: HWND) {
 const MODIFIERS: [VIRTUAL_KEY; 8] =
     [VK_LMENU, VK_RMENU, VK_LCONTROL, VK_RCONTROL, VK_LSHIFT, VK_RSHIFT, VK_LWIN, VK_RWIN];
 
-/// The key events for a plain paste: key-up for each held modifier, then
-/// Ctrl+V as `(key, is_up)` in order. Pure.
+/// An unassigned key. Tapped between the start of an Alt hold and its release
+/// it keeps the target from taking the Alt for a click on its menu bar.
+const VK_UNASSIGNED: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+
+/// The key events for a plain paste: key-up for each held modifier (behind a
+/// harmless key tap when Alt is among them, so the target does not open its
+/// menu on the lone Alt release), then Ctrl+V as `(key, is_up)` in order. Pure.
 fn paste_keys(held: &[VIRTUAL_KEY]) -> Vec<(VIRTUAL_KEY, bool)> {
-    let mut keys: Vec<(VIRTUAL_KEY, bool)> = held.iter().map(|&vk| (vk, true)).collect();
+    let mut keys: Vec<(VIRTUAL_KEY, bool)> = Vec::new();
+    if held.iter().any(|&vk| vk == VK_LMENU || vk == VK_RMENU) {
+        keys.extend([(VK_UNASSIGNED, false), (VK_UNASSIGNED, true)]);
+    }
+    keys.extend(held.iter().map(|&vk| (vk, true)));
     keys.extend([(VK_CONTROL, false), (VK_V, false), (VK_V, true), (VK_CONTROL, true)]);
     keys
 }
@@ -223,10 +236,36 @@ mod tests {
     #[test]
     fn held_modifiers_are_released_before_ctrl_v() {
         // Alt+V was just pressed and Alt is still down: Ctrl+Alt+V must not happen.
-        let keys = paste_keys(&[VK_LMENU, VK_LSHIFT]);
-        assert_eq!(&keys[..2], [(VK_LMENU, true), (VK_LSHIFT, true)]);
+        let keys = paste_keys(&[VK_LCONTROL, VK_LSHIFT]);
+        assert_eq!(&keys[..2], [(VK_LCONTROL, true), (VK_LSHIFT, true)]);
         assert_eq!(keys[2], (VK_CONTROL, false));
         assert_eq!(keys.len(), 6);
+    }
+
+    #[test]
+    fn a_held_alt_is_released_behind_a_key_tap_before_ctrl_v() {
+        // Alt+V, then Alt+3 with Alt still down: the target sees Alt, a tap, Alt up,
+        // then a plain Ctrl+V; never Ctrl+Alt+V, never a lone Alt press and release.
+        let keys = paste_keys(&[VK_LMENU]);
+        assert_eq!(
+            keys,
+            [
+                (VK_UNASSIGNED, false),
+                (VK_UNASSIGNED, true),
+                (VK_LMENU, true),
+                (VK_CONTROL, false),
+                (VK_V, false),
+                (VK_V, true),
+                (VK_CONTROL, true),
+            ]
+        );
+        assert!(!keys.iter().any(|&(vk, up)| (vk == VK_LMENU || vk == VK_RMENU) && !up));
+    }
+
+    #[test]
+    fn right_alt_counts_as_alt_and_no_alt_means_no_tap() {
+        assert_eq!(paste_keys(&[VK_RMENU])[0], (VK_UNASSIGNED, false));
+        assert!(!paste_keys(&[VK_LWIN]).iter().any(|&(vk, _)| vk == VK_UNASSIGNED));
     }
 
     #[test]

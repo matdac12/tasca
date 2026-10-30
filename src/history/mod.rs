@@ -21,6 +21,7 @@ mod draw;
 mod layout;
 mod paste;
 mod record;
+mod search;
 mod state;
 mod text;
 mod window;
@@ -66,7 +67,7 @@ struct Shell {
 
 impl Shell {
     fn layout(&self) -> Layout {
-        Layout::new(self.scale, self.machine.clips().len(), 0, false)
+        Layout::new(self.scale, self.machine.shown().len(), 0, !self.machine.query().is_empty())
     }
 }
 
@@ -216,7 +217,14 @@ fn dispatch(event: Event) {
         if !s.listening && matches!(event, Event::Copied(_)) {
             return Vec::new();
         }
-        s.machine.step(event, now)
+        let before = s.machine.query().len();
+        let effects = s.machine.step(event, now);
+        if s.machine.query().len() != before {
+            // A new list: show it from the top.
+            s.scroll = 0.0;
+            s.followed = 0;
+        }
+        effects
     }) else {
         return;
     };
@@ -233,8 +241,8 @@ fn apply(effect: Effect) {
         Effect::Skip(why) => log(format!("history: skipped copy ({why:?})")),
         Effect::Redraw => redraw(),
         Effect::Close => window::hide(window),
-        Effect::Paste { clip, target } => paste::paste(resident, window, &clip, target),
-        Effect::Copy { clip } => paste::copy(resident, window, &clip),
+        Effect::Paste { clip, target, plain } => paste::paste(resident, window, &clip, target, plain),
+        Effect::Copy { clip, plain } => paste::copy(resident, window, &clip, plain),
     }
 }
 
@@ -271,7 +279,7 @@ fn hover_at(layout: &Layout, pointer: (i32, i32), origin: (i32, i32), scroll: f3
 
 /// What the window shows now: only the rows in the viewport are built.
 fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
-    let clips = s.machine.clips();
+    let clips = s.machine.shown();
     let visible = layout.visible_rows(s.scroll);
     let first = visible.start;
     let rows = clips[visible]
@@ -285,8 +293,8 @@ fn view(s: &Shell, layout: Layout, now: u64) -> draw::View {
         selected: (!clips.is_empty()).then(|| s.machine.selected()),
         hover: s.hover,
         scroll: s.scroll,
-        query: String::new(),
-        count: text::count_label(clips.len()),
+        query: s.machine.query().to_string(),
+        count: text::count_label(s.machine.clips().len()),
     }
 }
 
@@ -312,6 +320,17 @@ pub(crate) fn on_mouse_move(x: i32, y: i32) {
 pub(crate) fn on_mouse_leave() {
     if with(|s| s.hover.take().is_some() && s.machine.is_open()) == Some(true) {
         redraw();
+    }
+}
+
+/// The left button went down at client pixel (x, y).
+pub(crate) fn on_click(x: i32, y: i32, shift: bool) {
+    let row = with(|s| match s.layout().hit(x, y, s.scroll) {
+        Hit::Row(i) if s.machine.is_open() => Some(i),
+        _ => None,
+    });
+    if let Some(Some(row)) = row {
+        dispatch(Event::Click { row, shift });
     }
 }
 
