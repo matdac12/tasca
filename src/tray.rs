@@ -260,8 +260,7 @@ fn menu(hwnd: HWND) {
             }
             ID_HISTORY => {
                 log("tray: show clipboard history");
-                // Posted, not called: the menu's foreground juggling is over
-                // by the time the History reads the foreground window.
+                // Posted, not called, so the menu is gone before the History opens.
                 let _ = PostMessageW(Some(hwnd), WM_SHOW_HISTORY, WPARAM(0), LPARAM(0));
             }
             ID_SETTINGS => {

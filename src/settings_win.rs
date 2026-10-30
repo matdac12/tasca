@@ -874,6 +874,7 @@ fn on_ok(hwnd: HWND) {
     // Both fields were checked against each other while recording, but the
     // live shortcuts are what `change` compares with: a swap needs two OKs.
     // (No `UI` borrow is held across these calls: they pump messages.)
+    let shelf_before = hotkey::display(Slot::Shelf).0;
     if let Err(e) = hotkey::change(parent, Slot::Shelf, pending[Slot::Shelf as usize]) {
         refuse(Slot::Shelf, &e);
         return;
@@ -881,7 +882,9 @@ fn on_ok(hwnd: HWND) {
     let history_shortcut = pending[Slot::History as usize];
     if let Err(e) = crate::resident::set_history(parent, history_on, history_shortcut) {
         refuse(Slot::History, &e);
-        tray::refresh(); // the Shelf shortcut may have changed already
+        // Nothing is saved, so the Shelf shortcut goes back to what it was.
+        let _ = hotkey::change(parent, Slot::Shelf, shelf_before);
+        tray::refresh();
         return;
     }
     let saved = settings::Settings {
