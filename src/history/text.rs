@@ -104,6 +104,19 @@ pub fn pinned_line(clip: &Clip) -> String {
     clip_kind(clip)
 }
 
+/// Plain text a Clip can be saved as a Snippet. An image has none. Trailing
+/// space is dropped; leading space stays, so indented text is kept. The Clip
+/// itself is left as it was.
+pub fn snippet_text(clip: &Clip) -> Option<String> {
+    match &clip.content {
+        Content::Text { .. } => {
+            if clip.text.trim().is_empty() { None } else { Some(clip.text.trim_end().to_string()) }
+        }
+        Content::Files { paths } if !paths.is_empty() => Some(paths.join("\n")),
+        _ => None,
+    }
+}
+
 /// The footer's right side.
 pub fn count_label(clips: usize) -> String {
     if clips == 1 { "1 Clip".to_string() } else { format!("{clips} Clips") }
@@ -201,6 +214,16 @@ mod tests {
     #[test]
     fn a_time_in_the_future_is_now() {
         assert_eq!(age(1_000, 500_000), "now");
+    }
+
+    #[test]
+    fn snippet_text_is_trimmed_text_or_paths_and_images_have_none() {
+        assert_eq!(snippet_text(&text_clip("  hello \n")).as_deref(), Some("  hello"));
+        assert_eq!(snippet_text(&text_clip("  \n")), None);
+        let paths = Content::Files { paths: vec!["C:\\a.txt".into(), "D:\\b".into()] };
+        assert_eq!(snippet_text(&with(paths, "")).as_deref(), Some("C:\\a.txt\nD:\\b"));
+        let img = Content::Image { width: 2, height: 2, png: Arc::new(vec![]), hash: 1 };
+        assert_eq!(snippet_text(&with(img, "")), None);
     }
 
     #[test]

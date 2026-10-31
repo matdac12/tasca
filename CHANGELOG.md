@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Snippets: text kept on purpose, separate from the History. A bookmark at
+  the top-right of the History panel opens the list. New, Save, Delete and
+  Copy. **Save as snippet** on a History row keeps that Clip's text (copied
+  files as paths; an image has nothing to save). The same text again moves
+  that snippet to the top.
+- Snippets are stored in `%LOCALAPPDATA%\Tasca\snippets.txt`. A damaged file
+  loads empty.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

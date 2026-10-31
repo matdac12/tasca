@@ -257,7 +257,7 @@ unsafe fn draw(rt: &ID2D1DCRenderTarget, fonts: &Fonts, v: &View) -> Result<()> 
         rt.DrawEllipse(&D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: 4.5, radiusY: 4.5 }, &lens, 1.3, None);
         rt.DrawLine(Vector2 { X: cx + 3.7, Y: cy + 3.7 }, Vector2 { X: cx + 7.0, Y: cy + 7.0 }, &lens, 1.3, None);
         let tx = s.left + SIDE + LENS_W + LENS_GAP;
-        let line = rect(tx, s.top, s.right - SIDE, s.bottom);
+        let line = rect(tx, s.top, s.right - super::layout::SAVED_W, s.bottom);
         let mut caret_x = tx;
         if v.query.is_empty() {
             text("Type to search", &fonts.search, line, &lens);
@@ -273,6 +273,7 @@ unsafe fn draw(rt: &ID2D1DCRenderTarget, fonts: &Fonts, v: &View) -> Result<()> 
         rt.FillRectangle(&rect(caret_x, mid - 8.0, caret_x + 1.0, mid + 8.0), &white(T1)?);
         let rule = white(RULE_A)?;
         rt.FillRectangle(&rect(s.left, s.bottom, s.right, s.bottom + hair), &rule);
+        draw_saved(rt, s.right - super::layout::SAVED_W, s.right - SIDE, mid, &white(T2)?);
 
         // The list, clipped to its viewport.
         let top = l.list_top();
@@ -290,6 +291,22 @@ unsafe fn draw(rt: &ID2D1DCRenderTarget, fonts: &Fonts, v: &View) -> Result<()> 
         text("Clear", &fonts.foot, foot, &t2);
         text(&v.count, &fonts.foot_r, foot, &t2);
         Ok(())
+    }
+}
+
+/// A bookmark at the right of the search line: the snippets list.
+unsafe fn draw_saved(rt: &ID2D1DCRenderTarget, left: f32, right: f32, mid: f32, b: &ID2D1SolidColorBrush) {
+    unsafe {
+        let (l, r) = (left + 6.0, right - 2.0);
+        let (t, bot) = (mid - 7.0, mid + 7.0);
+        let cx = (l + r) / 2.0;
+        let notch = bot - 4.0;
+        let stroke = 1.3;
+        rt.DrawLine(Vector2 { X: l, Y: t }, Vector2 { X: r, Y: t }, b, stroke, None);
+        rt.DrawLine(Vector2 { X: r, Y: t }, Vector2 { X: r, Y: notch }, b, stroke, None);
+        rt.DrawLine(Vector2 { X: r, Y: notch }, Vector2 { X: cx, Y: bot }, b, stroke, None);
+        rt.DrawLine(Vector2 { X: cx, Y: bot }, Vector2 { X: l, Y: notch }, b, stroke, None);
+        rt.DrawLine(Vector2 { X: l, Y: notch }, Vector2 { X: l, Y: t }, b, stroke, None);
     }
 }
 

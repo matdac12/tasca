@@ -25,6 +25,8 @@ pub const FOOT_H: f32 = 28.0;
 pub const EMPTY_H: f32 = 52.0;
 /// Where "Clear" can be hit, measured from the footer's left padding.
 const CLEAR_HIT_W: f32 = 56.0;
+/// The bookmark at the right of the search line.
+pub const SAVED_W: f32 = 28.0;
 /// Shadow margins around the panel (the Shelf's).
 pub const MARGIN_L: f32 = 8.0;
 pub const MARGIN_T: f32 = 10.0;
@@ -45,6 +47,8 @@ pub enum Hit {
     /// The transparent shadow band around the panel.
     Margin,
     Search,
+    /// The bookmark at the right of the search line. Opens saved snippets.
+    Saved,
     /// Row index in the shown list, 0 = top.
     Row(usize),
     Clear,
@@ -206,7 +210,11 @@ impl Layout {
         }
         let list_top = self.list_top();
         if y < list_top {
-            return if y < p.top + PAD + SEARCH_H { Hit::Search } else { Hit::Panel };
+            if y < p.top + PAD + SEARCH_H {
+                let s = self.search();
+                return if x >= s.right - SAVED_W && y >= s.top { Hit::Saved } else { Hit::Search };
+            }
+            return Hit::Panel;
         }
         if y >= self.footer_top() {
             let clear_right = p.left + PAD + SIDE + CLEAR_HIT_W;
@@ -315,6 +323,8 @@ mod tests {
         let at = |x: f32, y: f32| l.hit(x as i32, y as i32, 0.0);
         assert_eq!(at(2.0, 2.0), Hit::Margin);
         assert_eq!(at(200.0, 30.0), Hit::Search);
+        // The bookmark sits at the right of the search line.
+        assert_eq!(at(l.search().right - 8.0, 30.0), Hit::Saved);
         // The "Recent" label is the first 26 DIP of the list.
         assert_eq!(at(200.0, l.list_top() + 5.0), Hit::Panel);
         assert_eq!(at(200.0, l.list_top() + 30.0), Hit::Row(0));

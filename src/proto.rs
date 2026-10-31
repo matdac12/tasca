@@ -42,6 +42,9 @@ pub const WM_HISTORY_PASTE_READY: u32 = WM_APP + 24;
 /// A History row's image preview was decoded on its worker; it is in a cache, not in the message.
 pub const WM_HISTORY_PREVIEW: u32 = WM_APP + 25;
 
+/// The snippets file finished loading on its worker. The list is in a queue, not in the message.
+pub const WM_SNIPPETS_LOADED: u32 = WM_APP + 26;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +66,7 @@ mod tests {
             WM_HISTORY_LOADED,
             WM_HISTORY_PASTE_READY,
             WM_HISTORY_PREVIEW,
+            WM_SNIPPETS_LOADED,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(all[i + 1..].iter().all(|b| a != b), "{a:#x} used twice");

@@ -28,8 +28,9 @@ A file shelf and a clipboard history for Windows. Drop files on the Shelf, keep 
   with lives in `%TEMP%\Tasca\<drop-id>\`, and drop folders older than 24 hours
   are swept at startup. Your real files are never touched. Tasca also keeps
   `%LOCALAPPDATA%\Tasca\settings.ini` (your settings), `tasca.log` (a debug
-  log, with the previous run kept as `tasca.log.1`) and the clipboard History
-  in `%LOCALAPPDATA%\Tasca\history\`; that is all it writes.
+  log, with the previous run kept as `tasca.log.1`), the clipboard History
+  in `%LOCALAPPDATA%\Tasca\history\` and snippets in
+  `%LOCALAPPDATA%\Tasca\snippets.txt`; that is all it writes.
 - **A clipboard history next to it.** Press **Alt+V** and a list of what you
   copied opens at the pointer. See [Clipboard History](#clipboard-history).
 
@@ -105,7 +106,7 @@ open, so you can type at once.
 | Alt+1 to 9, or Ctrl+1 to 9      | Pastes the Clip with that number, even while Alt is still held from Alt+V |
 | Ctrl+P                          | Pins or unpins the selected Clip                                      |
 | Ctrl+Delete                     | Deletes the selected Clip, pinned or not                              |
-| Right-click a row               | Paste, Paste as plain text, Pin/Unpin, Delete                         |
+| Right-click a row               | Paste, Paste as plain text, Save as snippet, Pin/Unpin, Delete        |
 | **Clear** (footer)              | Deletes every unpinned Clip, without asking. Pins stay                |
 | Esc                             | Clears the search; on an empty search, closes the panel               |
 | Alt+V again, or click elsewhere | Closes the panel, nothing pasted                                      |
@@ -152,6 +153,24 @@ shortcut first. Otherwise Tasca keeps running and says so in the tray tooltip
 and the Settings window; pick another History shortcut there. While the
 History is on, Tasca takes Alt+V in every app, so a program that uses it as a
 menu key (the View menu) loses it.
+
+## Snippets
+
+Text you want to keep, separate from the History. The bookmark at the
+top-right of the History panel (the search row) opens the list.
+
+Type in the box and **Save** to add one, or click a row to change it and
+**Save** again. **New** clears the box. **Delete** removes the selected row.
+**Copy** puts the text on the clipboard; paste it with Ctrl+V. Esc closes
+the list.
+
+In the History, right-click a Clip and choose **Save as snippet**. Text is
+saved as typed. Copied files are saved as their paths, one per line. An image
+has nothing to save, so the command is greyed. Saving the same text again
+moves that snippet to the top.
+
+They are stored in `%LOCALAPPDATA%\Tasca\snippets.txt`. A damaged file loads
+empty instead of stopping Tasca.
 
 ## Shortcut, tray and settings
 

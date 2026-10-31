@@ -311,6 +311,10 @@ fn apply(effect: Effect) {
         Effect::Close => window::hide(window),
         Effect::Paste { clip, target, plain } => paste::paste(resident, window, &clip, target, plain),
         Effect::Copy { clip, plain } => paste::copy(resident, window, &clip, plain),
+        Effect::SaveSnippet { text } => {
+            log("history: save as snippet");
+            crate::snippets::save_text(text);
+        }
     }
 }
 
@@ -431,6 +435,12 @@ pub(crate) fn on_click(x: i32, y: i32, shift: bool) {
     match hit {
         Some(Some(Hit::Row(row))) => dispatch(Event::Click { row, shift }),
         Some(Some(Hit::Clear)) => dispatch(Event::Clear),
+        Some(Some(Hit::Saved)) => {
+            let owner = with(|s| s.window);
+            if let Some(owner) = owner {
+                crate::snippets::open(owner);
+            }
+        }
         _ => {}
     }
 }
@@ -441,12 +451,14 @@ pub(crate) fn on_click(x: i32, y: i32, shift: bool) {
 /// the list can change meanwhile (a copy arriving).
 pub(crate) fn on_right_click(x: i32, y: i32) {
     let target = with(|s| match s.layout().hit(x, y, s.scroll) {
-        Hit::Row(i) if s.machine.is_open() => s.machine.shown().get(i).map(|c| (s.window, c.id, c.pinned)),
+        Hit::Row(i) if s.machine.is_open() => {
+            s.machine.shown().get(i).map(|c| (s.window, c.id, c.pinned, text::snippet_text(c).is_some()))
+        }
         _ => None,
     });
-    let Some(Some((window, id, pinned))) = target else { return };
+    let Some(Some((window, id, pinned, can_snippet))) = target else { return };
     dispatch(Event::Select(id));
-    if let Some(action) = menu::pick(window, pinned, x, y) {
+    if let Some(action) = menu::pick(window, pinned, can_snippet, x, y) {
         dispatch(Event::ClipAction { id, action });
     }
 }
