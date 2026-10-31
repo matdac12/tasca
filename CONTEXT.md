@@ -38,8 +38,8 @@ _Avoid_: Secret, sensitive clip
 ## Snippets
 
 **Snippet**:
-Text kept on purpose, with a title and a body, listed newest first. Separate from a Clip.
+Text kept on purpose, listed newest first. Separate from a Clip.
 _Avoid_: Clip, Item
 
 **Save as snippet**:
-Keep a Clip's text as a Snippet. The same text again moves that Snippet to the top and keeps its title.
+Keep a Clip's text as a Snippet. The same text again moves that Snippet to the top.

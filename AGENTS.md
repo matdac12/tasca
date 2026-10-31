@@ -25,7 +25,7 @@ Rules for anyone (human or agent) changing this repo.
   (parsing, the safe-shortcut rule, `RegisterHotKey`), `settings.rs`
   (`settings.ini`, pure), `settings_win.rs` (the Settings window and key
   recorder), `tray.rs`, `startup.rs` (the `Tasca.lnk` shortcut), `log.rs`,
-  `proto.rs`, `snippets/` (saved text: list, editor, store). New features
+  `proto.rs`, `snippets.rs` (saved text). New features
   get their own module; wire them in through the hooks in `resident.rs`,
   and give every new `WM_APP+n` a line in `proto.rs`.
 - **Re-entrancy:** release builds use `panic = "abort"`. Never hold a

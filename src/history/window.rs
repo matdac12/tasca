@@ -283,7 +283,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_ERASEBKGND => LRESULT(1),
             WM_ACTIVATE => {
-                if wp.0 & 0xffff == WA_INACTIVE as usize {
+                // The snippets list is owned by this window. Closing here would
+                // take that list down with it.
+                if wp.0 & 0xffff == WA_INACTIVE as usize && !crate::snippets::is_open() {
                     super::dispatch(Event::Deactivated);
                     return LRESULT(0);
                 }

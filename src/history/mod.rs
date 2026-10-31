@@ -435,6 +435,12 @@ pub(crate) fn on_click(x: i32, y: i32, shift: bool) {
     match hit {
         Some(Some(Hit::Row(row))) => dispatch(Event::Click { row, shift }),
         Some(Some(Hit::Clear)) => dispatch(Event::Clear),
+        Some(Some(Hit::Saved)) => {
+            let owner = with(|s| s.window);
+            if let Some(owner) = owner {
+                crate::snippets::open(owner);
+            }
+        }
         _ => {}
     }
 }

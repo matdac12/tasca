@@ -42,11 +42,8 @@ pub const WM_HISTORY_PASTE_READY: u32 = WM_APP + 24;
 /// A History row's image preview was decoded on its worker; it is in a cache, not in the message.
 pub const WM_HISTORY_PREVIEW: u32 = WM_APP + 25;
 
-/// The Snippets panel is asked to open (the tray). No pointer in the message.
-pub const WM_SHOW_SNIPPETS: u32 = WM_APP + 26;
-
-/// The Snippets store finished loading on its worker; the Snippets are in a queue, not in the message.
-pub const WM_SNIPPETS_LOADED: u32 = WM_APP + 27;
+/// The snippets file finished loading on its worker. The list is in a queue, not in the message.
+pub const WM_SNIPPETS_LOADED: u32 = WM_APP + 26;
 
 #[cfg(test)]
 mod tests {
@@ -69,7 +66,6 @@ mod tests {
             WM_HISTORY_LOADED,
             WM_HISTORY_PASTE_READY,
             WM_HISTORY_PREVIEW,
-            WM_SHOW_SNIPPETS,
             WM_SNIPPETS_LOADED,
         ];
         for (i, a) in all.iter().enumerate() {

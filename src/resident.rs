@@ -285,9 +285,7 @@ unsafe fn run_inner(show: bool, elevated: bool) -> Result<i32> {
         } else {
             log("settings: clipboard history off");
         }
-        if let Err(e) = snippets::create(hwnd) {
-            log(format!("snippets failed to start: {e:?}"));
-        }
+        snippets::create(hwnd);
         tray::add(hwnd, tray::current_tip());
         #[cfg(debug_assertions)]
         if std::env::var_os("TASCA_DEV_SETTINGS").is_some() {

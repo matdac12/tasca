@@ -30,7 +30,7 @@ A file shelf and a clipboard history for Windows. Drop files on the Shelf, keep 
   `%LOCALAPPDATA%\Tasca\settings.ini` (your settings), `tasca.log` (a debug
   log, with the previous run kept as `tasca.log.1`), the clipboard History
   in `%LOCALAPPDATA%\Tasca\history\` and snippets in
-  `%LOCALAPPDATA%\Tasca\snippets\`; that is all it writes.
+  `%LOCALAPPDATA%\Tasca\snippets.txt`; that is all it writes.
 - **A clipboard history next to it.** Press **Alt+V** and a list of what you
   copied opens at the pointer. See [Clipboard History](#clipboard-history).
 
@@ -156,37 +156,28 @@ menu key (the View menu) loses it.
 
 ## Snippets
 
-Text you want to keep, separate from the History. **Show snippets** in the
-tray menu opens a dark panel at the pointer, inside the monitor's work area.
-It takes keyboard focus while it is open. Choosing it again, Esc, or a click
-elsewhere closes it.
+Text you want to keep, separate from the History. The bookmark at the
+top-right of the History panel (the search row) opens the list.
 
-| Key or click               | What it does                                              |
-| -------------------------- | --------------------------------------------------------- |
-| Enter, or click a row      | Copies the snippet to the clipboard and closes the panel  |
-| Alt+1 to 9, or Ctrl+1 to 9 | Copies the snippet with that number                       |
-| Ctrl+N, or **New**         | Creates a snippet (a title, optional, and the text)       |
-| Ctrl+E, or right-click Edit | Edits the selected snippet                               |
-| Delete, or right-click Delete | Deletes it                                             |
-| Right-click Copy           | Copies it, same as Enter                                  |
-| Esc, or click elsewhere    | Closes the panel, nothing copied                          |
+Type in the box and **Save** to add one, or click a row to change it and
+**Save** again. **New** clears the box. **Delete** removes the selected row.
+**Copy** puts the text on the clipboard; paste it with Ctrl+V. Esc closes
+the list.
 
 In the History, right-click a Clip and choose **Save as snippet**. Text is
 saved as typed. Copied files are saved as their paths, one per line. An image
 has nothing to save, so the command is greyed. Saving the same text again
-moves that snippet to the top and keeps the title you gave it.
+moves that snippet to the top.
 
-The newest 200 snippets are kept, each at most 64 KB of text, under
-`%LOCALAPPDATA%\Tasca\snippets\`. A damaged store loads empty instead of
-stopping Tasca. Copying puts the text on the clipboard and leaves it there;
-paste it with Ctrl+V.
+They are stored in `%LOCALAPPDATA%\Tasca\snippets.txt`. A damaged file loads
+empty instead of stopping Tasca.
 
 ## Shortcut, tray and settings
 
 Tasca lives in the notification area. Left-click the tray icon, or press the
 global shortcut (**Ctrl+Alt+D** by default), to show or hide the Shelf.
 Right-click the icon for **Show shelf**, **Show clipboard history**,
-**Show snippets**, **Settings…** and **Quit**.
+**Settings…** and **Quit**.
 
 **Settings** lets you:
 
